@@ -130,7 +130,7 @@ class BotFlow(Base):
     mostrar_planos_2 = Column(Boolean, default=True)
 
 # =========================================================
-# 🧩 [ATUALIZADO V3] TABELA DE PASSOS INTERMEDIÁRIOS
+# 🧩 [ATUALIZADO V4] TABELA DE PASSOS INTERMEDIÁRIOS
 # =========================================================
 class BotFlowStep(Base):
     __tablename__ = "bot_flow_steps"
@@ -141,9 +141,12 @@ class BotFlowStep(Base):
     msg_media = Column(String, nullable=True)
     btn_texto = Column(String, default="Próximo ▶️")
     
-    # [NOVO V3] Controles de comportamento
+    # [V3] Controles de comportamento
     autodestruir = Column(Boolean, default=False)  # Se deve apagar após clicar
     mostrar_botao = Column(Boolean, default=True)  # Se deve mostrar botão
+    
+    # [NOVO V4] Temporizador entre mensagens
+    delay_seconds = Column(Integer, default=0)  # Segundos de delay (0 = sem delay)
     
     created_at = Column(DateTime, default=datetime.utcnow)
     bot = relationship("Bot", back_populates="steps")

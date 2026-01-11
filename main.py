@@ -23,6 +23,7 @@ from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowSt
 import update_db 
 
 from migration_v3 import executar_migracao_v3
+from migration_v4 import executar_migracao_v4
 
 # Configuração de Log
 logging.basicConfig(level=logging.INFO)
@@ -55,6 +56,7 @@ def get_db():
 def on_startup():
     init_db()
     executar_migracao_v3()
+    executar_migracao_v4()
     
     # 2. FORÇA A CRIAÇÃO DE TODAS AS COLUNAS FALTANTES (TODAS AS VERSÕES)
     try:
@@ -376,6 +378,7 @@ class FlowStepUpdate(BaseModel):
     btn_texto: Optional[str] = None
     autodestruir: Optional[bool] = None      # [NOVO V3]
     mostrar_botao: Optional[bool] = None     # [NOVO V3]
+    delay_seconds: Optional[int] = None  # [NOVO V4]
 
 
 class UserUpdateCRM(BaseModel):
@@ -767,6 +770,8 @@ def atualizar_passo_flow(bot_id: int, step_id: int, dados: FlowStepUpdate, db: S
         passo.autodestruir = dados.autodestruir
     if dados.mostrar_botao is not None:
         passo.mostrar_botao = dados.mostrar_botao
+    if dados.delay_seconds is not None:
+        passo.delay_seconds = dados.delay_seconds
     
     db.commit()
     db.refresh(passo)
@@ -1077,6 +1082,20 @@ async def receber_update_telegram(bot_token: str, request: Request, db: Session 
                         primeiro_passo.msg_texto, 
                         reply_markup=markup_step if primeiro_passo.mostrar_botao else None
                     )
+                
+                # [NOVO V4] Se não tem botão e tem delay, agenda próxima mensagem
+                if not primeiro_passo.mostrar_botao and primeiro_passo.delay_seconds > 0:
+                    logger.info(f"⏰ [BOT {bot_db.id}] Aguardando {primeiro_passo.delay_seconds}s antes de enviar próximo passo...")
+                    time.sleep(primeiro_passo.delay_seconds)
+                    
+                    # Simula o clique em next_step_1
+                    segundo_passo = db.query(BotFlowStep).filter(
+                        BotFlowStep.bot_id == bot_db.id, 
+                        BotFlowStep.step_order == 2
+                    ).first()
+                    
+                    if segundo_passo:
+                        enviar_passo_automatico(bot_temp, chat_id, segundo_passo, bot_db, db)
             else:
                 # Se não tem passos intermediários, vai direto pro checkout
                 logger.info(f"⚠️ [BOT {bot_db.id}] Nenhum passo intermediário configurado, indo direto para oferta")
@@ -1084,11 +1103,11 @@ async def receber_update_telegram(bot_token: str, request: Request, db: Session 
             
             bot_temp.answer_callback_query(update.callback_query.id)
 
-       # ============================================================
-# TRECHO 4: ATUALIZAR WEBHOOK - NAVEGAÇÃO ENTRE PASSOS
-# ============================================================
-# Localize a seção: elif update.callback_query and update.callback_query.data.startswith("next_step_"):
-# SUBSTITUA a parte completa por:
+        # ============================================================
+        # TRECHO 4: ATUALIZAR WEBHOOK - NAVEGAÇÃO ENTRE PASSOS
+        # ============================================================
+        # Localize a seção: elif update.callback_query and update.callback_query.data.startswith("next_step_"):
+        # SUBSTITUA a parte completa por:
 
         elif update.callback_query and update.callback_query.data.startswith("next_step_"):
             chat_id = update.callback_query.message.chat.id
@@ -1176,6 +1195,23 @@ async def receber_update_telegram(bot_token: str, request: Request, db: Session 
                         proximo_passo.msg_texto, 
                         reply_markup=markup_step if proximo_passo.mostrar_botao else None
                     )
+                
+                # [NOVO V4] Se não tem botão e tem delay, agenda próxima mensagem
+                if not proximo_passo.mostrar_botao and proximo_passo.delay_seconds > 0:
+                    logger.info(f"⏰ [BOT {bot_db.id}] Aguardando {proximo_passo.delay_seconds}s antes de enviar próximo passo...")
+                    time.sleep(proximo_passo.delay_seconds)
+                    
+                    # Busca o passo seguinte
+                    passo_seguinte = db.query(BotFlowStep).filter(
+                        BotFlowStep.bot_id == bot_db.id, 
+                        BotFlowStep.step_order == proximo_passo.step_order + 1
+                    ).first()
+                    
+                    if passo_seguinte:
+                        enviar_passo_automatico(bot_temp, chat_id, passo_seguinte, bot_db, db)
+                    else:
+                        # Não tem mais passos, vai pro checkout
+                        enviar_oferta_final(bot_temp, chat_id, bot_db.fluxo, bot_db.id, db)
             else:
                 # Não tem mais passos, vai para checkout
                 logger.info(f"⚠️ [BOT {bot_db.id}] Não há mais passos, indo para checkout")
@@ -1849,6 +1885,80 @@ Toque no link abaixo para entrar no Canal VIP:
         logger.error(f"❌ ERRO CRÍTICO NO WEBHOOK: {e}")
         # Mesmo com erro, retornamos 200 ou estrutura json para não travar o gateway (opcional, depende da estratégia)
         return {"status": "error"}
+
+# =========================================================
+# 🚀 [NOVO V4] FUNÇÃO AUXILIAR - ENVIO AUTOMÁTICO DE PASSOS
+# =========================================================
+def enviar_passo_automatico(bot_temp, chat_id, passo, bot_db, db):
+    """
+    Envia um passo automaticamente após o delay.
+    Similar à lógica do next_step_, mas sem callback do usuário.
+    """
+    logger.info(f"✅ [BOT {bot_db.id}] Enviando passo {passo.step_order} automaticamente: {passo.msg_texto[:30]}...")
+    
+    # Verifica se existe passo seguinte
+    passo_seguinte = db.query(BotFlowStep).filter(
+        BotFlowStep.bot_id == bot_db.id, 
+        BotFlowStep.step_order == passo.step_order + 1
+    ).first()
+    
+    # Define o callback do botão
+    if passo_seguinte:
+        next_callback = f"next_step_{passo.step_order}"
+    else:
+        next_callback = "go_checkout"
+    
+    # Cria botão (se necessário)
+    markup_step = types.InlineKeyboardMarkup()
+    if passo.mostrar_botao:
+        markup_step.add(types.InlineKeyboardButton(
+            text=passo.btn_texto, 
+            callback_data=next_callback
+        ))
+    
+    # Envia a mensagem
+    try:
+        if passo.msg_media:
+            try:
+                if passo.msg_media.lower().endswith(('.mp4', '.mov')):
+                    bot_temp.send_video(
+                        chat_id, 
+                        passo.msg_media, 
+                        caption=passo.msg_texto, 
+                        reply_markup=markup_step if passo.mostrar_botao else None
+                    )
+                else:
+                    bot_temp.send_photo(
+                        chat_id, 
+                        passo.msg_media, 
+                        caption=passo.msg_texto, 
+                        reply_markup=markup_step if passo.mostrar_botao else None
+                    )
+            except:
+                bot_temp.send_message(
+                    chat_id, 
+                    passo.msg_texto, 
+                    reply_markup=markup_step if passo.mostrar_botao else None
+                )
+        else:
+            bot_temp.send_message(
+                chat_id, 
+                passo.msg_texto, 
+                reply_markup=markup_step if passo.mostrar_botao else None
+            )
+        
+        # [RECURSIVO] Se este passo também não tem botão e tem delay, continua
+        if not passo.mostrar_botao and passo.delay_seconds > 0 and passo_seguinte:
+            logger.info(f"⏰ [BOT {bot_db.id}] Aguardando {passo.delay_seconds}s antes do próximo...")
+            time.sleep(passo.delay_seconds)
+            enviar_passo_automatico(bot_temp, chat_id, passo_seguinte, bot_db, db)
+        elif not passo.mostrar_botao and not passo_seguinte:
+            # Acabaram os passos, vai pro checkout
+            enviar_oferta_final(bot_temp, chat_id, bot_db.fluxo, bot_db.id, db)
+            
+    except Exception as e:
+        logger.error(f"❌ [BOT {bot_db.id}] Erro ao enviar passo automático: {e}")
+
 
 # --- WEBHOOKS (LÓGICA V2) ---
 # =========================================================
