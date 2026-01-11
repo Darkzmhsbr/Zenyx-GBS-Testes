@@ -1006,8 +1006,9 @@ async def receber_update_telegram(bot_token: str, request: Request, db: Session 
                 bot_temp.send_message(chat_id, texto, reply_markup=markup_step if passo.mostrar_botao else None)
 
         # ============================================================
-        # 🔥 CORREÇÃO CRÍTICA: CLIQUE NO BOTÃO "PASSO_2"
+        # TRECHO 1: CALLBACK "passo_2"
         # ============================================================
+
         elif update.callback_query and update.callback_query.data == "passo_2":
             chat_id = update.callback_query.message.chat.id
             msg_id = update.callback_query.message.message_id
@@ -1053,31 +1054,32 @@ async def receber_update_telegram(bot_token: str, request: Request, db: Session 
                         callback_data=next_callback
                     ))
 
-                # Envia o PASSO 1
+                # Envia o PASSO 1 e SALVA o message_id
+                sent_msg = None
                 if primeiro_passo.msg_media:
                     try:
                         if primeiro_passo.msg_media.lower().endswith(('.mp4', '.mov')):
-                            bot_temp.send_video(
+                            sent_msg = bot_temp.send_video(
                                 chat_id, 
                                 primeiro_passo.msg_media, 
                                 caption=primeiro_passo.msg_texto, 
                                 reply_markup=markup_step if primeiro_passo.mostrar_botao else None
                             )
                         else:
-                            bot_temp.send_photo(
+                            sent_msg = bot_temp.send_photo(
                                 chat_id, 
                                 primeiro_passo.msg_media, 
                                 caption=primeiro_passo.msg_texto, 
                                 reply_markup=markup_step if primeiro_passo.mostrar_botao else None
                             )
                     except:
-                        bot_temp.send_message(
+                        sent_msg = bot_temp.send_message(
                             chat_id, 
                             primeiro_passo.msg_texto, 
                             reply_markup=markup_step if primeiro_passo.mostrar_botao else None
                         )
                 else:
-                    bot_temp.send_message(
+                    sent_msg = bot_temp.send_message(
                         chat_id, 
                         primeiro_passo.msg_texto, 
                         reply_markup=markup_step if primeiro_passo.mostrar_botao else None
@@ -1088,7 +1090,15 @@ async def receber_update_telegram(bot_token: str, request: Request, db: Session 
                     logger.info(f"⏰ [BOT {bot_db.id}] Aguardando {primeiro_passo.delay_seconds}s antes de enviar próximo passo...")
                     time.sleep(primeiro_passo.delay_seconds)
                     
-                    # Simula o clique em next_step_1
+                    # [CORREÇÃO V4.1] Auto-destruir antes de enviar a próxima
+                    if primeiro_passo.autodestruir and sent_msg:
+                        try:
+                            bot_temp.delete_message(chat_id, sent_msg.message_id)
+                            logger.info(f"💣 [BOT {bot_db.id}] Mensagem do passo 1 auto-destruída")
+                        except:
+                            pass
+                    
+                    # Busca o segundo passo
                     segundo_passo = db.query(BotFlowStep).filter(
                         BotFlowStep.bot_id == bot_db.id, 
                         BotFlowStep.step_order == 2
@@ -1103,11 +1113,10 @@ async def receber_update_telegram(bot_token: str, request: Request, db: Session 
             
             bot_temp.answer_callback_query(update.callback_query.id)
 
+
         # ============================================================
-        # TRECHO 4: ATUALIZAR WEBHOOK - NAVEGAÇÃO ENTRE PASSOS
+        # TRECHO 2: CALLBACK "next_step_"
         # ============================================================
-        # Localize a seção: elif update.callback_query and update.callback_query.data.startswith("next_step_"):
-        # SUBSTITUA a parte completa por:
 
         elif update.callback_query and update.callback_query.data.startswith("next_step_"):
             chat_id = update.callback_query.message.chat.id
@@ -1166,31 +1175,32 @@ async def receber_update_telegram(bot_token: str, request: Request, db: Session 
                         callback_data=next_callback
                     ))
 
-                # Envia a mensagem do PRÓXIMO PASSO
+                # Envia a mensagem do PRÓXIMO PASSO e SALVA o message_id
+                sent_msg = None
                 if proximo_passo.msg_media:
                     try:
                         if proximo_passo.msg_media.lower().endswith(('.mp4', '.mov')):
-                            bot_temp.send_video(
+                            sent_msg = bot_temp.send_video(
                                 chat_id, 
                                 proximo_passo.msg_media, 
                                 caption=proximo_passo.msg_texto, 
                                 reply_markup=markup_step if proximo_passo.mostrar_botao else None
                             )
                         else:
-                            bot_temp.send_photo(
+                            sent_msg = bot_temp.send_photo(
                                 chat_id, 
                                 proximo_passo.msg_media, 
                                 caption=proximo_passo.msg_texto, 
                                 reply_markup=markup_step if proximo_passo.mostrar_botao else None
                             )
                     except:
-                        bot_temp.send_message(
+                        sent_msg = bot_temp.send_message(
                             chat_id, 
                             proximo_passo.msg_texto, 
                             reply_markup=markup_step if proximo_passo.mostrar_botao else None
                         )
                 else:
-                    bot_temp.send_message(
+                    sent_msg = bot_temp.send_message(
                         chat_id, 
                         proximo_passo.msg_texto, 
                         reply_markup=markup_step if proximo_passo.mostrar_botao else None
@@ -1200,6 +1210,14 @@ async def receber_update_telegram(bot_token: str, request: Request, db: Session 
                 if not proximo_passo.mostrar_botao and proximo_passo.delay_seconds > 0:
                     logger.info(f"⏰ [BOT {bot_db.id}] Aguardando {proximo_passo.delay_seconds}s antes de enviar próximo passo...")
                     time.sleep(proximo_passo.delay_seconds)
+                    
+                    # [CORREÇÃO V4.1] Auto-destruir antes de enviar a próxima
+                    if proximo_passo.autodestruir and sent_msg:
+                        try:
+                            bot_temp.delete_message(chat_id, sent_msg.message_id)
+                            logger.info(f"💣 [BOT {bot_db.id}] Mensagem do passo {proximo_passo.step_order} auto-destruída")
+                        except:
+                            pass
                     
                     # Busca o passo seguinte
                     passo_seguinte = db.query(BotFlowStep).filter(
@@ -1886,9 +1904,10 @@ Toque no link abaixo para entrar no Canal VIP:
         # Mesmo com erro, retornamos 200 ou estrutura json para não travar o gateway (opcional, depende da estratégia)
         return {"status": "error"}
 
-# =========================================================
-# 🚀 [NOVO V4] FUNÇÃO AUXILIAR - ENVIO AUTOMÁTICO DE PASSOS
-# =========================================================
+# ============================================================
+# TRECHO 3: FUNÇÃO "enviar_passo_automatico"
+# ============================================================
+
 def enviar_passo_automatico(bot_temp, chat_id, passo, bot_db, db):
     """
     Envia um passo automaticamente após o delay.
@@ -1916,41 +1935,51 @@ def enviar_passo_automatico(bot_temp, chat_id, passo, bot_db, db):
             callback_data=next_callback
         ))
     
-    # Envia a mensagem
+    # Envia a mensagem e SALVA o message_id
+    sent_msg = None
     try:
         if passo.msg_media:
             try:
                 if passo.msg_media.lower().endswith(('.mp4', '.mov')):
-                    bot_temp.send_video(
+                    sent_msg = bot_temp.send_video(
                         chat_id, 
                         passo.msg_media, 
                         caption=passo.msg_texto, 
                         reply_markup=markup_step if passo.mostrar_botao else None
                     )
                 else:
-                    bot_temp.send_photo(
+                    sent_msg = bot_temp.send_photo(
                         chat_id, 
                         passo.msg_media, 
                         caption=passo.msg_texto, 
                         reply_markup=markup_step if passo.mostrar_botao else None
                     )
             except:
-                bot_temp.send_message(
+                sent_msg = bot_temp.send_message(
                     chat_id, 
                     passo.msg_texto, 
                     reply_markup=markup_step if passo.mostrar_botao else None
                 )
         else:
-            bot_temp.send_message(
+            sent_msg = bot_temp.send_message(
                 chat_id, 
                 passo.msg_texto, 
                 reply_markup=markup_step if passo.mostrar_botao else None
             )
         
-        # [RECURSIVO] Se este passo também não tem botão e tem delay, continua
+        # [RECURSIVO] Se este passo também não tem botão e tem delay
         if not passo.mostrar_botao and passo.delay_seconds > 0 and passo_seguinte:
             logger.info(f"⏰ [BOT {bot_db.id}] Aguardando {passo.delay_seconds}s antes do próximo...")
             time.sleep(passo.delay_seconds)
+            
+            # [CORREÇÃO V4.1] Auto-destruir antes de enviar a próxima
+            if passo.autodestruir and sent_msg:
+                try:
+                    bot_temp.delete_message(chat_id, sent_msg.message_id)
+                    logger.info(f"💣 [BOT {bot_db.id}] Mensagem do passo {passo.step_order} auto-destruída (automático)")
+                except:
+                    pass
+            
             enviar_passo_automatico(bot_temp, chat_id, passo_seguinte, bot_db, db)
         elif not passo.mostrar_botao and not passo_seguinte:
             # Acabaram os passos, vai pro checkout
