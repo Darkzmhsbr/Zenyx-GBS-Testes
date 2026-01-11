@@ -328,7 +328,7 @@ class BotCreate(BaseModel):
     nome: str
     token: str
     id_canal_vip: str
-    admin_principal_id: Optional[str] = None
+    admin_principal_id: Optional[str] = None  # Campo opcional
 
 # Novo modelo para Atualização
 class BotUpdate(BaseModel):
@@ -603,39 +603,39 @@ def remover_admin(bot_id: int, telegram_id: str, db: Session = Depends(get_db)):
 # 🤖 LISTAR BOTS (COM KPI TOTAIS E USERNAME CORRIGIDO)
 # =========================================================
 @app.get("/api/admin/bots")
-def list_bots(db: Session = Depends(get_db)):
+def listar_bots(db: Session = Depends(get_db)):
+    """
+    Lista todos os bots com estatísticas calculadas.
+    Retorna leads (total de pedidos) e revenue (soma das vendas aprovadas).
+    """
     bots = db.query(Bot).all()
-    resultado = []
     
+    result = []
     for bot in bots:
-        # [CORREÇÃO] Remove todos os @ existentes e adiciona apenas um limpo
-        u_name = bot.username or "..."
-        if u_name != "...":
-            u_name = f"@{u_name.lstrip('@')}"
-
-        # Leads (Total de pessoas únicas que iniciaram checkout)
-        leads = db.query(func.count(Pedido.telegram_id.distinct())).filter(Pedido.bot_id == bot.id).scalar() or 0
+        # [NOVO] Calcula total de leads (todos os pedidos)
+        leads_count = db.query(Pedido).filter(Pedido.bot_id == bot.id).count()
         
-        # [CORREÇÃO FINANCEIRA] 
-        # Soma TODAS as vendas aprovadas, INCLUSIVE as expiradas.
-        # Dinheiro recebido não pode sumir só porque o tempo acabou.
-        receita = db.query(func.sum(Pedido.valor)).filter(
-            Pedido.bot_id == bot.id, 
-            Pedido.status.in_(['paid', 'approved', 'completed', 'succeeded', 'active', 'expired'])
-        ).scalar() or 0.0
-
-        resultado.append({
+        # [NOVO] Calcula receita total (apenas vendas aprovadas)
+        vendas_aprovadas = db.query(Pedido).filter(
+            Pedido.bot_id == bot.id,
+            Pedido.status == "approved"
+        ).all()
+        revenue = sum([v.valor for v in vendas_aprovadas]) if vendas_aprovadas else 0.0
+        
+        result.append({
             "id": bot.id,
             "nome": bot.nome,
             "token": bot.token,
-            "username": u_name,
-            "status": bot.status,
-            "admin_principal_id": bot.admin_principal_id,
+            "username": bot.username,
             "id_canal_vip": bot.id_canal_vip,
-            "leads": leads,
-            "revenue": receita
+            "admin_principal_id": bot.admin_principal_id,
+            "status": bot.status,
+            "leads": leads_count,        # [NOVO] Total de pedidos
+            "revenue": revenue,          # [NOVO] Soma das vendas
+            "created_at": bot.created_at
         })
-    return resultado
+    
+    return result
 
 # ===========================
 # 💎 PLANOS & FLUXO
