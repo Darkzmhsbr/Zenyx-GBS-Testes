@@ -1120,47 +1120,63 @@ async def receber_update_telegram(bot_token: str, request: Request, db: Session 
                 BotFlowStep.step_order == passo_atual_order + 1
             ).first()
 
-            # [NOVO V3] Só cria botão se mostrar_botao = True
-            markup_step = types.InlineKeyboardMarkup()
-            if proximo_passo.mostrar_botao:
-                markup_step.add(types.InlineKeyboardButton(
-                    text=proximo_passo.btn_texto, 
-                    callback_data=next_callback
-                ))
+            # ✅ VERIFICA SE O PRÓXIMO PASSO EXISTE
+            if proximo_passo:
+                logger.info(f"✅ [BOT {bot_db.id}] Enviando passo {proximo_passo.step_order}: {proximo_passo.msg_texto[:30]}...")
+                
+                # Verifica se existe um passo DEPOIS deste
+                passo_seguinte = db.query(BotFlowStep).filter(
+                    BotFlowStep.bot_id == bot_db.id, 
+                    BotFlowStep.step_order == proximo_passo.step_order + 1
+                ).first()
+                
+                # Define o callback do botão
+                next_callback = f"next_step_{proximo_passo.step_order}" if passo_seguinte else "go_checkout"
+                
+                logger.info(f"🔗 [BOT {bot_db.id}] Próximo botão vai chamar: {next_callback}")
+                
+                # [NOVO V3] Só cria botão se mostrar_botao = True
+                markup_step = types.InlineKeyboardMarkup()
+                if proximo_passo.mostrar_botao:
+                    markup_step.add(types.InlineKeyboardButton(
+                        text=proximo_passo.btn_texto, 
+                        callback_data=next_callback
+                    ))
 
-            # Envia a mensagem do PRÓXIMO PASSO
-            if proximo_passo.msg_media:
-                try:
-                    if proximo_passo.msg_media.lower().endswith(('.mp4', '.mov')):
-                        bot_temp.send_video(
+                # Envia a mensagem do PRÓXIMO PASSO
+                if proximo_passo.msg_media:
+                    try:
+                        if proximo_passo.msg_media.lower().endswith(('.mp4', '.mov')):
+                            bot_temp.send_video(
+                                chat_id, 
+                                proximo_passo.msg_media, 
+                                caption=proximo_passo.msg_texto, 
+                                reply_markup=markup_step if proximo_passo.mostrar_botao else None
+                            )
+                        else:
+                            bot_temp.send_photo(
+                                chat_id, 
+                                proximo_passo.msg_media, 
+                                caption=proximo_passo.msg_texto, 
+                                reply_markup=markup_step if proximo_passo.mostrar_botao else None
+                            )
+                    except:
+                        bot_temp.send_message(
                             chat_id, 
-                            proximo_passo.msg_media, 
-                            caption=proximo_passo.msg_texto, 
+                            proximo_passo.msg_texto, 
                             reply_markup=markup_step if proximo_passo.mostrar_botao else None
                         )
-                    else:
-                        bot_temp.send_photo(
-                            chat_id, 
-                            proximo_passo.msg_media, 
-                            caption=proximo_passo.msg_texto, 
-                            reply_markup=markup_step if proximo_passo.mostrar_botao else None
-                        )
-                except:
+                else:
                     bot_temp.send_message(
                         chat_id, 
                         proximo_passo.msg_texto, 
                         reply_markup=markup_step if proximo_passo.mostrar_botao else None
                     )
             else:
-                bot_temp.send_message(
-                    chat_id, 
-                    proximo_passo.msg_texto, 
-                    reply_markup=markup_step if proximo_passo.mostrar_botao else None
-                )
+                # ✅ AQUI SIM: Se não tem próximo passo, vai para checkout
                 logger.warning(f"⚠️ [BOT {bot_db.id}] Não há mais passos, indo para checkout")
-                # Não tem mais passos, vai para oferta
                 enviar_oferta_final(bot_temp, chat_id, bot_db.fluxo, bot_db.id, db)
-            
+
             bot_temp.answer_callback_query(update.callback_query.id)
 
         # --- IR PARA CHECKOUT ---
