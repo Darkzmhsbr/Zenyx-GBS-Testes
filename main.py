@@ -438,26 +438,47 @@ def criar_bot(bot_data: BotCreate, db: Session = Depends(get_db)):
 
     try:
         tb = telebot.TeleBot(bot_data.token)
+        
+        # [NOVO] Busca informações do bot do Telegram
+        bot_info = tb.get_me()
+        username = bot_info.username if hasattr(bot_info, 'username') else None
+        
+        # Configura webhook
         public_url = os.getenv("RAILWAY_PUBLIC_DOMAIN", "")
         if public_url:
             webhook_url = f"https://{public_url}/webhook/{bot_data.token}"
             tb.set_webhook(url=webhook_url)
-        status = "conectado"
+        
+        status = "ativo"
     except Exception as e:
-        logger.error(f"Erro: {e}")
-        raise HTTPException(status_code=400, detail="Token inválido.")
+        logger.error(f"Erro ao criar bot: {e}")
+        raise HTTPException(status_code=400, detail="Token inválido ou erro ao conectar.")
 
     novo_bot = Bot(
         nome=bot_data.nome,
         token=bot_data.token,
+        username=username,  # [CORRIGIDO] Salva o username do Telegram
         id_canal_vip=bot_data.id_canal_vip,
         status=status,
-        admin_principal_id=bot_data.admin_principal_id # Salva já na criação
+        admin_principal_id=bot_data.admin_principal_id
     )
     db.add(novo_bot)
     db.commit()
     db.refresh(novo_bot)
-    return novo_bot
+    
+    # [NOVO] Retorna com username incluído
+    return {
+        "id": novo_bot.id,
+        "nome": novo_bot.nome,
+        "token": novo_bot.token,
+        "username": novo_bot.username,
+        "id_canal_vip": novo_bot.id_canal_vip,
+        "admin_principal_id": novo_bot.admin_principal_id,
+        "status": novo_bot.status,
+        "leads": 0,
+        "revenue": 0.0,
+        "created_at": novo_bot.created_at
+    }
 
 @app.put("/api/admin/bots/{bot_id}")
 def update_bot(bot_id: int, dados: BotCreate, db: Session = Depends(get_db)):
@@ -605,20 +626,27 @@ def remover_admin(bot_id: int, telegram_id: str, db: Session = Depends(get_db)):
 @app.get("/api/admin/bots")
 def listar_bots(db: Session = Depends(get_db)):
     """
-    Lista todos os bots com estatísticas calculadas.
-    Retorna leads (total de pedidos) e revenue (soma das vendas aprovadas).
+    Lista todos os bots com estatísticas corrigidas.
+    
+    CORREÇÕES:
+    - Leads: Conta usuários ÚNICOS (DISTINCT telegram_id)
+    - Revenue: Soma apenas pedidos com status 'approved' ou 'paid'
+    - Username: Garante que sempre retorna o username
     """
     bots = db.query(Bot).all()
     
     result = []
     for bot in bots:
-        # [NOVO] Calcula total de leads (todos os pedidos)
-        leads_count = db.query(Pedido).filter(Pedido.bot_id == bot.id).count()
+        # [CORRIGIDO] Conta USUÁRIOS ÚNICOS, não pedidos duplicados
+        from sqlalchemy import func
+        leads_count = db.query(func.count(func.distinct(Pedido.telegram_id))).filter(
+            Pedido.bot_id == bot.id
+        ).scalar() or 0
         
-        # [NOVO] Calcula receita total (apenas vendas aprovadas)
+        # [CORRIGIDO] Soma vendas aprovadas (múltiplos status possíveis)
         vendas_aprovadas = db.query(Pedido).filter(
             Pedido.bot_id == bot.id,
-            Pedido.status == "approved"
+            Pedido.status.in_(["approved", "paid", "active"])  # Aceita múltiplos status
         ).all()
         revenue = sum([v.valor for v in vendas_aprovadas]) if vendas_aprovadas else 0.0
         
@@ -626,16 +654,17 @@ def listar_bots(db: Session = Depends(get_db)):
             "id": bot.id,
             "nome": bot.nome,
             "token": bot.token,
-            "username": bot.username,
+            "username": bot.username or None,  # Retorna None se vazio
             "id_canal_vip": bot.id_canal_vip,
             "admin_principal_id": bot.admin_principal_id,
             "status": bot.status,
-            "leads": leads_count,        # [NOVO] Total de pedidos
-            "revenue": revenue,          # [NOVO] Soma das vendas
+            "leads": leads_count,        # [CORRIGIDO] Usuários únicos
+            "revenue": revenue,          # [CORRIGIDO] Soma de vendas aprovadas
             "created_at": bot.created_at
         })
     
     return result
+
 
 # ===========================
 # 💎 PLANOS & FLUXO
