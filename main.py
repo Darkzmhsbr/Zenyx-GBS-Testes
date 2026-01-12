@@ -2068,19 +2068,19 @@ class IndividualRemarketingRequest(BaseModel):
     campaign_history_id: int # ID do histórico para copiar a msg
 
 # ============================================================
-# CORREÇÃO: ROTA SEND-INDIVIDUAL (SUBSTITUA A PARTIR DA LINHA 2070)
+# CORREÇÃO REAL: ROTA SEND-INDIVIDUAL 
+# (Substitua a partir da linha 2070 no main.py)
 # ============================================================
 
 @app.post("/api/admin/remarketing/send-individual")
 def enviar_remarketing_individual(payload: IndividualRemarketingRequest, db: Session = Depends(get_db)):
     """
-    Envia uma campanha de remarketing individual para um usuário específico
+    Envia uma campanha de remarketing individual
     
-    CORREÇÃO: Agora busca a mensagem diretamente da tabela RemarketingCampaign
-    ao invés de tentar decodificar do JSON (que pode estar vazio ou corrompido)
+    CORREÇÃO: Parseia corretamente o campo config (JSON)
     """
     try:
-        # 1. Busca os dados da campanha
+        # 1. Busca campanha
         campanha = db.query(RemarketingCampaign).filter(
             RemarketingCampaign.id == payload.campaign_history_id
         ).first()
@@ -2088,34 +2088,38 @@ def enviar_remarketing_individual(payload: IndividualRemarketingRequest, db: Ses
         if not campanha:
             raise HTTPException(404, "Campanha não encontrada")
         
-        # 2. Pega mensagem e mídia DIRETAMENTE das colunas da tabela
-        msg = campanha.message or ""  # 🔥 CORREÇÃO: Usa coluna message da tabela
-        media = campanha.media or ""  # 🔥 CORREÇÃO: Usa coluna media da tabela
-        
-        # Se AINDA estiver vazio, tenta do config (fallback)
-        if not msg:
+        # 2. Parseia o JSON config
+        config = {}
+        if campanha.config:
             try:
+                # Tenta parsear uma vez
                 config = json.loads(campanha.config) if isinstance(campanha.config, str) else campanha.config
+                
+                # Se ainda for string, parseia de novo (JSON dentro de JSON)
                 if isinstance(config, str):
                     config = json.loads(config)
-                msg = config.get("msg", "")
-                if not media:
-                    media = config.get("media", "")
             except Exception as e:
-                logger.warning(f"Falha ao parsear config: {e}")
+                logger.error(f"Erro ao parsear config: {e}")
+                logger.error(f"Config raw: {campanha.config[:200] if campanha.config else 'None'}")
+                raise HTTPException(400, f"Config da campanha inválido: {str(e)}")
+        
+        # 3. Extrai mensagem e mídia
+        msg = config.get("msg", "").strip()
+        media = config.get("media", "").strip()
         
         # Validação: Mensagem não pode estar vazia
         if not msg:
+            logger.error(f"Config parseado: {config}")
             raise HTTPException(400, "Campanha não tem mensagem configurada")
         
-        # 3. Busca bot
+        # 4. Busca bot
         bot_db = db.query(Bot).filter(Bot.id == payload.bot_id).first()
         if not bot_db:
             raise HTTPException(404, "Bot não encontrado")
         
         sender = telebot.TeleBot(bot_db.token)
         
-        # 4. Monta Botão (se tiver plano)
+        # 5. Monta botão (se tiver plano)
         markup = None
         if campanha.plano_id:
             plano = db.query(PlanoConfig).filter(PlanoConfig.id == campanha.plano_id).first()
@@ -2125,18 +2129,21 @@ def enviar_remarketing_individual(payload: IndividualRemarketingRequest, db: Ses
                 btn_text = f"🔥 {plano.nome_exibicao} - R$ {preco:.2f}"
                 markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"checkout_{plano.id}"))
         
-        # 5. Envia mensagem
+        # 6. Envia mensagem
         if media:
             try:
+                # Tenta enviar com mídia
                 if media.lower().endswith(('.mp4', '.mov', '.avi')):
                     sender.send_video(payload.user_telegram_id, media, caption=msg, reply_markup=markup)
                 else:
                     sender.send_photo(payload.user_telegram_id, media, caption=msg, reply_markup=markup)
             except Exception as e_media:
-                logger.warning(f"Falha ao enviar mídia ({e_media}). Enviando só texto.")
-                sender.send_message(payload.user_telegram_id, msg, reply_markup=markup)
+                # Se falhar, envia só texto
+                logger.warning(f"Falha ao enviar mídia: {e_media}")
+                sender.send_message(payload.user_telegram_id, msg, reply_markup=markup, parse_mode="HTML")
         else:
-            sender.send_message(payload.user_telegram_id, msg, reply_markup=markup)
+            # Envia só texto
+            sender.send_message(payload.user_telegram_id, msg, reply_markup=markup, parse_mode="HTML")
         
         logger.info(f"✅ Campanha individual enviada para {payload.user_telegram_id}")
         
@@ -2151,7 +2158,7 @@ def enviar_remarketing_individual(payload: IndividualRemarketingRequest, db: Ses
     except Exception as e:
         logger.error(f"Erro envio individual: {e}")
         raise HTTPException(500, f"Erro ao enviar: {str(e)}")
-        
+
 # =========================================================
 # 📢 LÓGICA DE REMARKETING (ALINHADA COM O FRONTEND + LÓGICA DE CONJUNTOS)
 # =========================================================
