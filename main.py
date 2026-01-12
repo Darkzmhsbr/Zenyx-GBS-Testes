@@ -1943,16 +1943,91 @@ def status_remarketing():
     return CAMPAIGN_STATUS
 
 @app.get("/api/admin/remarketing/history/{bot_id}")
-def historico_remarketing(bot_id: int, db: Session = Depends(get_db)):
-    history = db.query(RemarketingCampaign).filter(RemarketingCampaign.bot_id == bot_id).order_by(RemarketingCampaign.data_envio.desc()).all()
-    return [{
-        "id": h.id, 
-        "data": h.data_envio.strftime("%d/%m/%Y %H:%M"), 
-        "total": h.total_leads, 
-        "sent": h.sent_success, 
-        "blocked": h.blocked_count, 
-        "config": {"content_data": h.config}
-    } for h in history]
+def get_remarketing_history(
+    bot_id: int, 
+    page: int = 1,        # [NOVO] Número da página
+    per_page: int = 10,   # [NOVO] Itens por página (padrão 10)
+    db: Session = Depends(get_db)
+):
+    """
+    Retorna o histórico de campanhas de remarketing com paginação.
+    
+    Parâmetros:
+    - bot_id: ID do bot
+    - page: Número da página (começa em 1)
+    - per_page: Registros por página (padrão 10, máximo 50)
+    
+    Retorna:
+    {
+        "data": [...],
+        "total": 25,
+        "page": 1,
+        "per_page": 10,
+        "total_pages": 3
+    }
+    """
+    
+    # Limita per_page a no máximo 50
+    per_page = min(per_page, 50)
+    
+    # Query base
+    query = db.query(RemarketingCampaign).filter(
+        RemarketingCampaign.bot_id == bot_id
+    )
+    
+    # [NOVO] Conta total de registros
+    total_count = query.count()
+    
+    # [NOVO] Calcula total de páginas
+    total_pages = (total_count + per_page - 1) // per_page
+    
+    # [NOVO] Aplica paginação
+    offset = (page - 1) * per_page
+    campanhas = query.order_by(RemarketingCampaign.data_envio.desc()).offset(offset).limit(per_page).all()
+    
+    # Formata resposta
+    result = []
+    for camp in campanhas:
+        result.append({
+            "id": camp.id,
+            "data": camp.data_envio.strftime("%d/%m/%Y %H:%M") if camp.data_envio else "N/A",
+            "target": camp.target,
+            "total": camp.total_leads,
+            "blocked": camp.blocked_count,
+            "config": camp.config
+        })
+    
+    # [NOVO] Retorna com metadados de paginação
+    return {
+        "data": result,
+        "total": total_count,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages
+    }
+
+# ============================================================
+# ROTA 2: DELETE HISTÓRICO (NOVA!)
+# ============================================================
+# COLE ESTA ROTA NOVA logo APÓS a rota de histórico:
+
+@app.delete("/api/admin/remarketing/history/{history_id}")
+def delete_remarketing_history(history_id: int, db: Session = Depends(get_db)):
+    """
+    Deleta uma campanha do histórico.
+    """
+    campanha = db.query(RemarketingCampaign).filter(
+        RemarketingCampaign.id == history_id
+    ).first()
+    
+    if not campanha:
+        raise HTTPException(status_code=404, detail="Campanha não encontrada")
+    
+    db.delete(campanha)
+    db.commit()
+    
+    return {"status": "ok", "message": "Campanha deletada com sucesso"}
+
 
 # =========================================================
 # 📊 ROTA DE DASHBOARD (KPIs REAIS E CUMULATIVOS)
