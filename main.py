@@ -2191,12 +2191,12 @@ def processar_envio_remarketing(bot_id: int, payload: RemarketingRequest, db: Se
                 elif payload.expiration_mode == "hours": data_expiracao = agora + timedelta(hours=val)
                 elif payload.expiration_mode == "days": data_expiracao = agora + timedelta(days=val)
 
-    # --- 3. SELEÇÃO DE PÚBLICO (SETS MATEMÁTICOS - INFALÍVEL) ---
+    # --- 3. SELEÇÃO DE PÚBLICO (COM SUPORTE A LEADS) ---
     bot_sender = telebot.TeleBot(bot_db.token)
     lista_final_ids = []
 
     if payload.is_test:
-        # Modo Teste: Envia apenas para o ID específico ou Admin
+        # Modo Teste
         if payload.specific_user_id:
             lista_final_ids = [str(payload.specific_user_id).strip()]
         else:
@@ -2205,49 +2205,79 @@ def processar_envio_remarketing(bot_id: int, payload: RemarketingRequest, db: Se
         logger.info(f"🧪 MODO TESTE: Enviando para {lista_final_ids}")
 
     else:
-        # A) Busca TODOS os IDs únicos deste bot
+        # A) Buscar LEADS (tabela leads) - TOPO do funil
+        q_leads = db.query(Lead.user_id).filter(Lead.bot_id == bot_id).distinct()
+        ids_leads = {str(r[0]).strip() for r in q_leads.all() if r[0]}
+        
+        # B) Buscar TODOS os pedidos
         q_todos = db.query(Pedido.telegram_id).filter(Pedido.bot_id == bot_id).distinct()
-        ids_todos = {str(r[0]).strip() for r in q_todos.all() if r[0]}
+        ids_pedidos = {str(r[0]).strip() for r in q_todos.all() if r[0]}
 
-        # B) Busca PAGOS (Ids de quem tem status positivo)
-        # Atenção: func.lower garante que pegue 'Paid', 'paid', 'PAID'
+        # C) Buscar PAGOS (status_funil='fundo')
         q_pagos = db.query(Pedido.telegram_id).filter(
-            Pedido.bot_id == bot_id, 
-            func.lower(Pedido.status).in_(['paid', 'active', 'approved', 'completed', 'succeeded'])
+            Pedido.bot_id == bot_id,
+            Pedido.status_funil == 'fundo'
         ).distinct()
         ids_pagantes = {str(r[0]).strip() for r in q_pagos.all() if r[0]}
+        
+        # D) Buscar MEIO (status_funil='meio')
+        q_meio = db.query(Pedido.telegram_id).filter(
+            Pedido.bot_id == bot_id,
+            Pedido.status_funil == 'meio'
+        ).distinct()
+        ids_meio = {str(r[0]).strip() for r in q_meio.all() if r[0]}
 
-        # C) Busca EXPIRADOS
+        # E) Buscar EXPIRADOS (status_funil='expirado')
         q_expirados = db.query(Pedido.telegram_id).filter(
-            Pedido.bot_id == bot_id, 
-            func.lower(Pedido.status) == 'expired'
+            Pedido.bot_id == bot_id,
+            Pedido.status_funil == 'expirado'
         ).distinct()
         ids_expirados = {str(r[0]).strip() for r in q_expirados.all() if r[0]}
 
-        # --- APLICAÇÃO DO FILTRO (AQUI OCORRE A MÁGICA) ---
+        # --- APLICAÇÃO DO FILTRO ---
         
-        if filtro_limpo in ['pendentes', 'leads', 'nao_pagantes']:
-            # Lógica: Pega TODOS e remove quem PAGOU e quem já foi CLIENTE (expirado)
-            # Resultado: Só sobra leads frios (nunca compraram)
-            lista_final_ids = list(ids_todos - ids_pagantes - ids_expirados)
-            logger.info(f"📊 FILTRO PENDENTES: {len(ids_todos)} (Total) - {len(ids_pagantes)} (Pagos) - {len(ids_expirados)} (Expirados) = {len(lista_final_ids)}")
-
-        elif filtro_limpo in ['pagantes', 'ativos']:
+        if filtro_limpo == 'topo':
+            # TOPO: Apenas leads da tabela leads
+            lista_final_ids = list(ids_leads)
+            logger.info(f"🎯 FILTRO TOPO (LEADS): {len(lista_final_ids)} leads")
+        
+        elif filtro_limpo == 'meio':
+            # MEIO: Pedidos com status_funil='meio'
+            lista_final_ids = list(ids_meio)
+            logger.info(f"🔥 FILTRO MEIO: {len(lista_final_ids)} leads quentes")
+        
+        elif filtro_limpo == 'fundo':
+            # FUNDO: Pedidos com status_funil='fundo'
             lista_final_ids = list(ids_pagantes)
-            
-        elif filtro_limpo in ['expirados', 'ex_assinantes']:
-            # Lógica: Quem expirou MENOS quem renovou (pagou)
-            lista_final_ids = list(ids_expirados - ids_pagantes)
-            
+            logger.info(f"✅ FILTRO FUNDO: {len(lista_final_ids)} clientes")
+        
+        elif filtro_limpo in ['expirado', 'expirados']:
+            # EXPIRADOS: Pedidos com status_funil='expirado'
+            lista_final_ids = list(ids_expirados)
+            logger.info(f"⏰ FILTRO EXPIRADOS: {len(lista_final_ids)} expirados")
+        
+        elif filtro_limpo in ['pendentes', 'leads', 'nao_pagantes']:
+            # PENDENTES: Todos os pedidos que NÃO pagaram (MEIO + EXPIRADOS)
+            lista_final_ids = list(ids_meio | ids_expirados)
+            logger.info(f"⏳ FILTRO PENDENTES: {len(lista_final_ids)} pendentes")
+        
+        elif filtro_limpo in ['pagantes', 'ativos']:
+            # PAGANTES: Apenas clientes (FUNDO)
+            lista_final_ids = list(ids_pagantes)
+            logger.info(f"💰 FILTRO PAGANTES: {len(lista_final_ids)} pagantes")
+        
         elif filtro_limpo == 'todos':
-            lista_final_ids = list(ids_todos)
-            
+            # TODOS: LEADS + PEDIDOS (sem duplicação)
+            lista_final_ids = list(ids_leads | ids_pedidos)
+            logger.info(f"👥 FILTRO TODOS: {len(lista_final_ids)} contatos")
+        
         else:
-            # Se não reconheceu o filtro, por segurança NÃO envia ou envia log de erro
-            logger.warning(f"⚠️ Filtro desconhecido '{filtro_limpo}'. Assumindo TODOS por segurança.")
-            lista_final_ids = list(ids_todos)
+            # Fallback seguro
+            logger.warning(f"⚠️ Filtro desconhecido '{filtro_limpo}'. Assumindo TODOS.")
+            lista_final_ids = list(ids_leads | ids_pedidos)
 
     CAMPAIGN_STATUS["total"] = len(lista_final_ids)
+
 
     # --- 4. BOTÃO ---
     markup = None
@@ -2294,24 +2324,25 @@ def processar_envio_remarketing(bot_id: int, payload: RemarketingRequest, db: Se
 
     CAMPAIGN_STATUS["running"] = False
     
-    # Salva Histórico
-    if not payload.is_test:
-        campanha_db = RemarketingCampaign(
-            bot_id=bot_id,
-            campaign_id=uuid_campanha,
-            type="massivo",
-            target=filtro_limpo, # Salva o filtro correto que foi usado
-            config=json.dumps({"msg": payload.mensagem, "media": payload.media_url}),
-            status="concluido",
-            plano_id=plano_db.id if plano_db else None,
-            promo_price=preco_final if plano_db else None,
-            total_leads=len(lista_final_ids),
-            sent_success=sent_count,
-            blocked_count=blocked_count,
-            expiration_at=data_expiracao
-        )
-        db.add(campanha_db)
-        db.commit()
+    # Salvar no banco
+    nova_campanha = RemarketingCampaign(
+        bot_id=bot_id,
+        campaign_id=uuid_campanha,
+        target=filtro_limpo,  # Salva o target correto
+        config=json.dumps({
+            "mensagem": payload.mensagem,
+            "media_url": payload.media_url,
+            "incluir_oferta": payload.incluir_oferta,
+            "plano_oferta_id": payload.plano_oferta_id
+        }),
+        total_leads=len(lista_final_ids),
+        sent_success=sent_count,  # NÃO "sent"
+        blocked_count=blocked_count,  # NÃO "blocked"
+        data_envio=datetime.utcnow()
+    )
+    db.add(nova_campanha)
+    db.commit()
+
 
     logger.info(f"✅ FINALIZADO: {sent_count} enviados / {blocked_count} bloqueados")
 
@@ -2385,10 +2416,11 @@ def get_remarketing_history(
     for camp in campanhas:
         result.append({
             "id": camp.id,
-            "data": camp.data_envio.strftime("%d/%m/%Y %H:%M") if camp.data_envio else "N/A",
+            "data_envio": camp.data_envio.isoformat() if camp.data_envio else None,
             "target": camp.target,
-            "total": camp.total_leads,
-            "blocked": camp.blocked_count,
+            "sent_success": camp.sent_success or 0,
+            "blocked_count": camp.blocked_count or 0,
+            "total_leads": camp.total_leads or 0,
             "config": camp.config
         })
     
