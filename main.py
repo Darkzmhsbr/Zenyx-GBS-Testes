@@ -3028,72 +3028,50 @@ async def tg_wh(token: str, req: Request, db: Session = Depends(get_db)):
 def home():
 
     return {"status": "Zenyx SaaS Online - Banco Atualizado"}
-@app.get("/admin/clean-duplicates")
-def limpar_duplicatas(db: Session = Depends(get_db)):
-    """
-    Remove pedidos duplicados, mantendo apenas o mais recente de cada usuário.
-    Execute UMA VEZ apenas para limpar dados antigos.
-    """
-    
+@app.get("/admin/clean-duplicates-funil")
+def limpar_duplicatas_funil(db: Session = Depends(get_db)):
+    """Limpa duplicados em LEADS e PEDIDOS"""
     try:
-        # Busca todos os bots
         bots = db.query(Bot).all()
-        
-        total_removidos = 0
-        detalhes = []
+        total_leads_removidos = 0
+        total_pedidos_removidos = 0
         
         for bot in bots:
-            # Para cada bot, busca usuários duplicados
-            # Query: Agrupa por telegram_id e conta quantos pedidos cada um tem
-            duplicados = db.query(
-                Pedido.telegram_id,
-                func.count(Pedido.id).label('total')
-            ).filter(
-                Pedido.bot_id == bot.id
-            ).group_by(
-                Pedido.telegram_id
-            ).having(
-                func.count(Pedido.id) > 1  # Só pega quem tem mais de 1 pedido
-            ).all()
+            # Limpar LEADS duplicados
+            leads_dup = db.query(Lead.user_id, func.count(Lead.id).label('total')).filter(
+                Lead.bot_id == bot.id
+            ).group_by(Lead.user_id).having(func.count(Lead.id) > 1).all()
             
-            bot_removidos = 0
-            
-            for telegram_id, total in duplicados:
-                # Busca TODOS os pedidos deste usuário neste bot
-                pedidos_usuario = db.query(Pedido).filter(
-                    Pedido.telegram_id == telegram_id,
-                    Pedido.bot_id == bot.id
-                ).order_by(Pedido.created_at.desc()).all()  # Ordena do mais recente ao mais antigo
+            for user_id, _ in leads_dup:
+                leads = db.query(Lead).filter(
+                    Lead.user_id == user_id, Lead.bot_id == bot.id
+                ).order_by(Lead.primeiro_contato.desc()).all()
                 
-                if len(pedidos_usuario) > 1:
-                    # MANTÉM o primeiro (mais recente)
-                    pedido_manter = pedidos_usuario[0]
-                    
-                    # DELETA os outros (duplicatas antigas)
-                    for pedido_deletar in pedidos_usuario[1:]:
-                        db.delete(pedido_deletar)
-                        bot_removidos += 1
-                    
-                    logger.info(f"✅ Bot {bot.nome}: Mantido pedido #{pedido_manter.id} para {telegram_id}, removidos {len(pedidos_usuario)-1} duplicados")
+                for lead in leads[1:]:
+                    db.delete(lead)
+                    total_leads_removidos += 1
             
-            if bot_removidos > 0:
-                detalhes.append(f"Bot '{bot.nome}': {bot_removidos} duplicatas removidas")
-                total_removidos += bot_removidos
+            # Limpar PEDIDOS duplicados
+            pedidos_dup = db.query(Pedido.telegram_id, func.count(Pedido.id).label('total')).filter(
+                Pedido.bot_id == bot.id
+            ).group_by(Pedido.telegram_id).having(func.count(Pedido.id) > 1).all()
+            
+            for telegram_id, _ in pedidos_dup:
+                pedidos = db.query(Pedido).filter(
+                    Pedido.telegram_id == telegram_id, Pedido.bot_id == bot.id
+                ).order_by(Pedido.created_at.desc()).all()
+                
+                for pedido in pedidos[1:]:
+                    db.delete(pedido)
+                    total_pedidos_removidos += 1
         
-        # Commit das alterações
         db.commit()
-        
         return {
             "status": "ok",
-            "total_removidos": total_removidos,
-            "detalhes": detalhes,
-            "mensagem": f"Limpeza concluída! {total_removidos} duplicatas removidas."
+            "leads_removidos": total_leads_removidos,
+            "pedidos_removidos": total_pedidos_removidos,
+            "total": total_leads_removidos + total_pedidos_removidos
         }
-    
     except Exception as e:
         db.rollback()
-        logger.error(f"Erro ao limpar duplicatas: {e}")
-        return {
-            "status": "error",
-            "mensagem": str(e)
-        }
+        return {"status": "error", "mensagem": str(e)}
