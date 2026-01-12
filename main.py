@@ -1790,6 +1790,216 @@ def update_user_crm(user_id: str, dados: UserUpdateCRM, db: Session = Depends(ge
     db.commit()
     return {"status": "success"}
 
+# ============================================================
+# ROTA 1: LISTAR LEADS (TOPO DO FUNIL)
+# ============================================================
+@app.get("/api/admin/leads")
+def listar_leads(
+    bot_id: Optional[int] = None,
+    page: int = 1,
+    per_page: int = 50,
+    db: Session = Depends(get_db)
+):
+    """
+    Lista leads (usuários que só deram /start)
+    """
+    try:
+        # Query base
+        query = db.query(Lead)
+        
+        # Filtro por bot
+        if bot_id:
+            query = query.filter(Lead.bot_id == bot_id)
+        
+        # Contagem total
+        total = query.count()
+        
+        # Paginação
+        offset = (page - 1) * per_page
+        leads = query.order_by(Lead.created_at.desc()).offset(offset).limit(per_page).all()
+        
+        # Formata resposta
+        leads_data = []
+        for lead in leads:
+            leads_data.append({
+                "id": lead.id,
+                "user_id": lead.user_id,
+                "nome": lead.nome,
+                "username": lead.username,
+                "bot_id": lead.bot_id,
+                "status": lead.status,
+                "funil_stage": lead.funil_stage,
+                "primeiro_contato": lead.primeiro_contato.isoformat() if lead.primeiro_contato else None,
+                "ultimo_contato": lead.ultimo_contato.isoformat() if lead.ultimo_contato else None,
+                "total_remarketings": lead.total_remarketings,
+                "ultimo_remarketing": lead.ultimo_remarketing.isoformat() if lead.ultimo_remarketing else None,
+                "created_at": lead.created_at.isoformat() if lead.created_at else None
+            })
+        
+        return {
+            "data": leads_data,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "total_pages": (total + per_page - 1) // per_page
+        }
+    
+    except Exception as e:
+        logger.error(f"Erro ao listar leads: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# ROTA 2: ESTATÍSTICAS DO FUNIL
+# ============================================================
+@app.get("/api/admin/contacts/funnel-stats")
+def obter_estatisticas_funil(
+    bot_id: Optional[int] = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Retorna contadores de cada estágio do funil
+    """
+    try:
+        # Contar TOPO (tabela leads)
+        query_topo = db.query(Lead)
+        if bot_id:
+            query_topo = query_topo.filter(Lead.bot_id == bot_id)
+        topo = query_topo.count()
+        
+        # Contar MEIO (pedidos com status_funil='meio')
+        query_meio = db.query(Pedido).filter(Pedido.status_funil == 'meio')
+        if bot_id:
+            query_meio = query_meio.filter(Pedido.bot_id == bot_id)
+        meio = query_meio.count()
+        
+        # Contar FUNDO (pedidos com status_funil='fundo')
+        query_fundo = db.query(Pedido).filter(Pedido.status_funil == 'fundo')
+        if bot_id:
+            query_fundo = query_fundo.filter(Pedido.bot_id == bot_id)
+        fundo = query_fundo.count()
+        
+        # Contar EXPIRADOS (pedidos com status_funil='expirado')
+        query_expirados = db.query(Pedido).filter(Pedido.status_funil == 'expirado')
+        if bot_id:
+            query_expirados = query_expirados.filter(Pedido.bot_id == bot_id)
+        expirados = query_expirados.count()
+        
+        # Total
+        total = topo + meio + fundo + expirados
+        
+        return {
+            "topo": topo,
+            "meio": meio,
+            "fundo": fundo,
+            "expirados": expirados,
+            "total": total
+        }
+    
+    except Exception as e:
+        logger.error(f"Erro ao obter estatísticas do funil: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# ROTA 3: ATUALIZAR ROTA DE CONTATOS EXISTENTE
+# ============================================================
+# Procure a rota @app.get("/api/admin/contacts") no seu main.py
+# e SUBSTITUA por esta versão atualizada:
+
+@app.get("/api/admin/contacts")
+def listar_contatos(
+    bot_id: Optional[int] = None,
+    status: str = "todos",
+    page: int = 1,
+    per_page: int = 50,
+    db: Session = Depends(get_db)
+):
+    """
+    Lista contatos com paginação e filtros de funil
+    
+    Filtros de status:
+    - todos: Todos os pedidos
+    - meio: Pedidos com status_funil='meio' (gerou PIX)
+    - fundo: Pedidos com status_funil='fundo' (pagou)
+    - expirado: Pedidos com status_funil='expirado' (PIX venceu)
+    - aprovado/pagantes: Pedidos aprovados (legado)
+    - pendente/pendentes: Pedidos pendentes (legado)
+    """
+    try:
+        # Query base
+        query = db.query(Pedido)
+        
+        # Filtro por bot
+        if bot_id:
+            query = query.filter(Pedido.bot_id == bot_id)
+        
+        # Filtros de funil
+        if status == "meio":
+            query = query.filter(Pedido.status_funil == 'meio')
+        elif status == "fundo":
+            query = query.filter(Pedido.status_funil == 'fundo')
+        elif status == "expirado":
+            query = query.filter(Pedido.status_funil == 'expirado')
+        # Filtros legados (compatibilidade)
+        elif status in ["aprovado", "pagantes"]:
+            query = query.filter(Pedido.status.in_(['aprovado', 'approved']))
+        elif status in ["pendente", "pendentes"]:
+            query = query.filter(Pedido.status == 'pending')
+        elif status == "expirados":
+            query = query.filter(Pedido.status.in_(['expirado', 'expired']))
+        # "todos" não aplica filtro
+        
+        # Contagem total
+        total = query.count()
+        
+        # Paginação
+        offset = (page - 1) * per_page
+        contatos = query.order_by(Pedido.created_at.desc()).offset(offset).limit(per_page).all()
+        
+        # Formata resposta
+        contatos_data = []
+        for pedido in contatos:
+            contatos_data.append({
+                "id": pedido.id,
+                "telegram_id": pedido.telegram_id,
+                "first_name": pedido.first_name,
+                "username": pedido.username,
+                "plano_nome": pedido.plano_nome,
+                "plano_id": pedido.plano_id,
+                "valor": pedido.valor,
+                "status": pedido.status,
+                "txid": pedido.txid,
+                "qr_code": pedido.qr_code,
+                "data_aprovacao": pedido.data_aprovacao.isoformat() if pedido.data_aprovacao else None,
+                "data_expiracao": pedido.data_expiracao.isoformat() if pedido.data_expiracao else None,
+                "link_acesso": pedido.link_acesso,
+                "created_at": pedido.created_at.isoformat() if pedido.created_at else None,
+                # Campos de funil
+                "status_funil": pedido.status_funil,
+                "funil_stage": pedido.funil_stage,
+                "primeiro_contato": pedido.primeiro_contato.isoformat() if pedido.primeiro_contato else None,
+                "escolheu_plano_em": pedido.escolheu_plano_em.isoformat() if pedido.escolheu_plano_em else None,
+                "gerou_pix_em": pedido.gerou_pix_em.isoformat() if pedido.gerou_pix_em else None,
+                "pagou_em": pedido.pagou_em.isoformat() if pedido.pagou_em else None,
+                "dias_ate_compra": pedido.dias_ate_compra,
+                "total_remarketings": pedido.total_remarketings,
+                "ultimo_remarketing": pedido.ultimo_remarketing.isoformat() if pedido.ultimo_remarketing else None
+            })
+        
+        return {
+            "data": contatos_data,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "total_pages": (total + per_page - 1) // per_page
+        }
+    
+    except Exception as e:
+        logger.error(f"Erro ao listar contatos: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # --- ROTAS FLOW V2 (HÍBRIDO) ---
 @app.get("/api/admin/bots/{bot_id}/flow")
 def get_flow(bot_id: int, db: Session = Depends(get_db)):
