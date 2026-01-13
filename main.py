@@ -2114,11 +2114,16 @@ def send_individual_remarketing(
                 
                 # Texto do botão: "💎 PLANO VIP - R$ 29.90"
                 btn_text = f"💎 {plano.nome_exibicao} - R$ {preco_final:.2f}"
+
+                # 🔥 [CORRIGIDO] Callback que funciona no webhook
+                if campaign.campaign_id:
+                    btn_callback = f"promo_{campaign.campaign_id}"
+                    logger.info(f"🎯 Usando callback promo: {btn_callback}")
+                else:
+                    btn_callback = f"checkout_{plano.id}"
+                    logger.info(f"⚠️ Usando callback checkout: {btn_callback}")
                 
-                # Callback data: envia o ID do plano quando clicar
-                btn_callback = f"buy_plan_{plano.id}_{user_telegram_id}"
-                
-                # Adiciona o botão
+                # ✅ ADICIONA O BOTÃO AO MARKUP (VOCÊ ESQUECEU ISSO!)
                 markup.add(types.InlineKeyboardButton(
                     text=btn_text,
                     callback_data=btn_callback
@@ -2344,15 +2349,16 @@ def processar_envio_remarketing(bot_id: int, payload: RemarketingRequest, db: Se
                 try:
                     ext = payload.media_url.lower()
                     if ext.endswith(('.mp4', '.mov', '.avi')):
-                        bot_sender.send_video(uid, payload.media_url, caption=payload.mensagem, reply_markup=markup, parse_mode="Markdown")
+                        bot_sender.send_video(uid, payload.media_url, caption=payload.mensagem, reply_markup=markup, parse_mode="HTML")
                     else:
-                        bot_sender.send_photo(uid, payload.media_url, caption=payload.mensagem, reply_markup=markup, parse_mode="Markdown")
+                        bot_sender.send_photo(uid, payload.media_url, caption=payload.mensagem, reply_markup=markup, parse_mode="HTML")
                     midia_ok = True
                 except: pass 
             
             # Texto (se não foi mídia)
             if not midia_ok:
-                bot_sender.send_message(uid, payload.mensagem, reply_markup=markup, parse_mode="Markdown")
+                bot_sender.send_message(uid, payload.mensagem, reply_markup=markup, parse_mode="HTML")
+
             
             sent_count += 1
             time.sleep(0.04) 
