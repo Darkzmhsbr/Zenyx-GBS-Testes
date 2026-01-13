@@ -344,8 +344,16 @@ def verificar_expiracao_massa():
                 ).all()
                 
                 for u in vencidos:
-                    # Proteção: Se for admin, não remove
-                    if u.role == 'admin': continue
+                    # 🔥 [CORRIGIDO] Proteção: Se for admin, não remove
+                    # Verificar se é admin através da tabela BotAdmin
+                    admin = db.query(BotAdmin).filter(
+                        BotAdmin.telegram_id == u.telegram_id,
+                        BotAdmin.bot_id == u.bot_id
+                    ).first()
+                    
+                    if admin:
+                        logger.info(f"⏭️ Pulando admin: {u.telegram_id}")
+                        continue
                     
                     try:
                         logger.info(f"💀 Ceifando usuário vencido: {u.first_name} (Bot: {bot_data.nome})")
@@ -1698,118 +1706,6 @@ Copie o código abaixo para garantir sua vaga:
     except Exception as e:
         logger.error(f"Erro webhook: {e}")
         return {"status": "error"}
-
-# =========================================================
-# 👥 ROTAS DE CRM (BASE DE CONTATOS CORRIGIDA + FILTROS INTELIGENTES)
-# =========================================================
-@app.get("/api/admin/contacts")
-def listar_contatos(
-    bot_id: Optional[int] = None, 
-    status: str = "todos",
-    page: int = 1,        # [NOVO] Número da página (começa em 1)
-    per_page: int = 50,   # [NOVO] Quantidade por página (padrão 50)
-    db: Session = Depends(get_db)
-):
-    """
-    Lista contatos com paginação.
-    
-    Parâmetros:
-    - bot_id: ID do bot (opcional, filtra por bot)
-    - status: todos, pagantes, pendentes, expirados
-    - page: Número da página (1, 2, 3...)
-    - per_page: Registros por página (padrão 50, máximo 100)
-    
-    Retorna:
-    {
-        "data": [...],
-        "total": 150,
-        "page": 1,
-        "per_page": 50,
-        "total_pages": 3
-    }
-    """
-    
-    # Limita per_page a no máximo 100
-    per_page = min(per_page, 100)
-    
-    # Query base
-    query = db.query(Pedido)
-    
-    # Filtra por bot se especificado
-    if bot_id:
-        query = query.filter(Pedido.bot_id == bot_id)
-    
-    # Filtra por status
-    if status == "pagantes":
-        query = query.filter(Pedido.status.in_(["paid", "active", "approved"]))
-    elif status == "pendentes":
-        query = query.filter(Pedido.status == "pending")
-    elif status == "expirados":
-        query = query.filter(Pedido.status == "expired")
-    # Se status == "todos", não filtra
-    
-    # [NOVO] Conta total de registros (ANTES da paginação)
-    total_count = query.count()
-    
-    # [NOVO] Calcula total de páginas
-    total_pages = (total_count + per_page - 1) // per_page  # Divisão com arredondamento para cima
-    
-    # [NOVO] Aplica paginação (OFFSET e LIMIT)
-    offset = (page - 1) * per_page
-    contatos = query.order_by(Pedido.created_at.desc()).offset(offset).limit(per_page).all()
-    
-    # Formata resposta
-    result = []
-    for pedido in contatos:
-        result.append({
-            "id": pedido.id,
-            "telegram_id": pedido.telegram_id,
-            "first_name": pedido.first_name,
-            "username": pedido.username,
-            "plano_nome": pedido.plano_nome,
-            "valor": pedido.valor,
-            "status": pedido.status,
-            "role": getattr(pedido, 'role', 'user'),  # Seguro se o campo não existir
-            "custom_expiration": pedido.custom_expiration,
-            "created_at": pedido.created_at
-        })
-    
-    # [NOVO] Retorna com metadados de paginação
-    return {
-        "data": result,
-        "total": total_count,
-        "page": page,
-        "per_page": per_page,
-        "total_pages": total_pages
-    }
-
-# [NOVA ROTA] Atualização Manual de Usuário
-@app.put("/api/admin/users/{user_id}")
-def update_user_crm(user_id: str, dados: UserUpdateCRM, db: Session = Depends(get_db)):
-    # Tenta achar por ID ou TelegramID
-    p = db.query(Pedido).filter(
-        (Pedido.id == int(user_id) if user_id.isdigit() else False) | 
-        (Pedido.telegram_id == user_id)
-    ).first()
-    
-    if not p: raise HTTPException(404, "Usuário não encontrado")
-
-    if dados.first_name: p.first_name = dados.first_name
-    if dados.username: p.username = dados.username
-    if dados.status: p.status = dados.status
-
-    # Lógica da Data Manual (Dual Write)
-    if dados.custom_expiration:
-        try:
-            # Converte string ISO para datetime
-            dt = datetime.fromisoformat(dados.custom_expiration.replace("Z", ""))
-            p.data_expiracao = dt
-            p.custom_expiration = dt # Salva na coluna que o Front lê
-        except: pass 
-
-    db.commit()
-    return {"status": "success"}
-
 # ============================================================
 # ROTA 1: LISTAR LEADS (TOPO DO FUNIL)
 # ============================================================
@@ -1928,97 +1824,183 @@ def obter_estatisticas_funil(
 # e SUBSTITUA por esta versão atualizada:
 
 @app.get("/api/admin/contacts")
-def listar_contatos(
-    bot_id: Optional[int] = None,
+async def get_contacts(
     status: str = "todos",
+    bot_id: Optional[int] = None,
     page: int = 1,
     per_page: int = 50,
     db: Session = Depends(get_db)
 ):
     """
-    Lista contatos com paginação e filtros de funil
-    
-    Filtros de status:
-    - todos: Todos os pedidos
-    - meio: Pedidos com status_funil='meio' (gerou PIX)
-    - fundo: Pedidos com status_funil='fundo' (pagou)
-    - expirado: Pedidos com status_funil='expirado' (PIX venceu)
-    - aprovado/pagantes: Pedidos aprovados (legado)
-    - pendente/pendentes: Pedidos pendentes (legado)
+    🔥 [CORRIGIDO] Agora retorna LEADS + PEDIDOS quando status='todos'
     """
     try:
-        # Query base
-        query = db.query(Pedido)
-        
-        # Filtro por bot
-        if bot_id:
-            query = query.filter(Pedido.bot_id == bot_id)
-        
-        # Filtros de funil
-        if status == "meio":
-            query = query.filter(Pedido.status_funil == 'meio')
-        elif status == "fundo":
-            query = query.filter(Pedido.status_funil == 'fundo')
-        elif status == "expirado":
-            query = query.filter(Pedido.status_funil == 'expirado')
-        # Filtros legados (compatibilidade)
-        elif status in ["aprovado", "pagantes"]:
-            query = query.filter(Pedido.status.in_(['aprovado', 'approved']))
-        elif status in ["pendente", "pendentes"]:
-            query = query.filter(Pedido.status == 'pending')
-        elif status == "expirados":
-            query = query.filter(Pedido.status.in_(['expirado', 'expired']))
-        # "todos" não aplica filtro
-        
-        # Contagem total
-        total = query.count()
-        
-        # Paginação
         offset = (page - 1) * per_page
-        contatos = query.order_by(Pedido.created_at.desc()).offset(offset).limit(per_page).all()
+        all_contacts = []
         
-        # Formata resposta
-        contatos_data = []
-        for pedido in contatos:
-            contatos_data.append({
-                "id": pedido.id,
-                "telegram_id": pedido.telegram_id,
-                "first_name": pedido.first_name,
-                "username": pedido.username,
-                "plano_nome": pedido.plano_nome,
-                "plano_id": pedido.plano_id,
-                "valor": pedido.valor,
-                "status": pedido.status,
-                "txid": pedido.txid,
-                "qr_code": pedido.qr_code,
-                "data_aprovacao": pedido.data_aprovacao.isoformat() if pedido.data_aprovacao else None,
-                "data_expiracao": pedido.data_expiracao.isoformat() if pedido.data_expiracao else None,
-                "link_acesso": pedido.link_acesso,
-                "created_at": pedido.created_at.isoformat() if pedido.created_at else None,
-                # Campos de funil
-                "status_funil": pedido.status_funil,
-                "funil_stage": pedido.funil_stage,
-                "primeiro_contato": pedido.primeiro_contato.isoformat() if pedido.primeiro_contato else None,
-                "escolheu_plano_em": pedido.escolheu_plano_em.isoformat() if pedido.escolheu_plano_em else None,
-                "gerou_pix_em": pedido.gerou_pix_em.isoformat() if pedido.gerou_pix_em else None,
-                "pagou_em": pedido.pagou_em.isoformat() if pedido.pagou_em else None,
-                "dias_ate_compra": pedido.dias_ate_compra,
-                "total_remarketings": pedido.total_remarketings,
-                "ultimo_remarketing": pedido.ultimo_remarketing.isoformat() if pedido.ultimo_remarketing else None
-            })
+        # FILTRO: TODOS - Busca LEADS + PEDIDOS
+        if status == "todos":
+            # 1. Buscar LEADS (tabela Lead)
+            query_leads = db.query(Lead)
+            if bot_id:
+                query_leads = query_leads.filter(Lead.bot_id == bot_id)
+            
+            leads = query_leads.all()
+            
+            # Normalizar leads para o formato de contato
+            for lead in leads:
+                all_contacts.append({
+                    "id": lead.id,
+                    "telegram_id": lead.user_id,
+                    "user_id": lead.user_id,
+                    "first_name": lead.nome or "Sem nome",
+                    "nome": lead.nome or "Sem nome",
+                    "username": lead.username or "sem_username",
+                    "plano_nome": "-",
+                    "valor": 0.0,
+                    "status": "pending",
+                    "role": "user",
+                    "custom_expiration": None,
+                    "created_at": lead.created_at,
+                    "origem": "lead"
+                })
+            
+            # 2. Buscar PEDIDOS (tabela Pedido)
+            query_pedidos = db.query(Pedido)
+            if bot_id:
+                query_pedidos = query_pedidos.filter(Pedido.bot_id == bot_id)
+            
+            pedidos = query_pedidos.all()
+            
+            # Normalizar pedidos para o formato de contato
+            for pedido in pedidos:
+                all_contacts.append({
+                    "id": pedido.id,
+                    "telegram_id": pedido.telegram_id,
+                    "user_id": pedido.telegram_id,
+                    "first_name": pedido.first_name or "Sem nome",
+                    "nome": pedido.first_name or "Sem nome",
+                    "username": pedido.username or "sem_username",
+                    "plano_nome": pedido.plano_nome or "-",
+                    "valor": pedido.valor or 0.0,
+                    "status": pedido.status,
+                    "role": "user",
+                    "custom_expiration": pedido.custom_expiration,
+                    "created_at": pedido.created_at,
+                    "origem": "pedido"
+                })
+            
+            # Ordenar por data de criação (mais recentes primeiro)
+            all_contacts.sort(key=lambda x: x["created_at"], reverse=True)
+            
+            # Paginar
+            total = len(all_contacts)
+            pag_contacts = all_contacts[offset:offset + per_page]
+            
+            return {
+                "data": pag_contacts,
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+                "total_pages": (total + per_page - 1) // per_page
+            }
         
-        return {
-            "data": contatos_data,
-            "total": total,
-            "page": page,
-            "per_page": per_page,
-            "total_pages": (total + per_page - 1) // per_page
-        }
-    
+        # FILTRO: PAGANTES
+        elif status == "pagantes":
+            query = db.query(Pedido).filter(Pedido.status.in_(["paid", "active", "approved"]))
+            if bot_id:
+                query = query.filter(Pedido.bot_id == bot_id)
+            
+            total = query.count()
+            pedidos = query.offset(offset).limit(per_page).all()
+            
+            contacts = [{
+                "id": p.id,
+                "telegram_id": p.telegram_id,
+                "first_name": p.first_name,
+                "username": p.username,
+                "plano_nome": p.plano_nome,
+                "valor": p.valor,
+                "status": p.status,
+                "role": "user",
+                "custom_expiration": p.custom_expiration,
+                "created_at": p.created_at
+            } for p in pedidos]
+            
+            return {
+                "data": contacts,
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+                "total_pages": (total + per_page - 1) // per_page
+            }
+        
+        # FILTRO: PENDENTES
+        elif status == "pendentes":
+            query = db.query(Pedido).filter(Pedido.status == "pending")
+            if bot_id:
+                query = query.filter(Pedido.bot_id == bot_id)
+            
+            total = query.count()
+            pedidos = query.offset(offset).limit(per_page).all()
+            
+            contacts = [{
+                "id": p.id,
+                "telegram_id": p.telegram_id,
+                "first_name": p.first_name,
+                "username": p.username,
+                "plano_nome": p.plano_nome,
+                "valor": p.valor,
+                "status": p.status,
+                "role": "user",
+                "custom_expiration": p.custom_expiration,
+                "created_at": p.created_at
+            } for p in pedidos]
+            
+            return {
+                "data": contacts,
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+                "total_pages": (total + per_page - 1) // per_page
+            }
+        
+        # FILTRO: EXPIRADOS
+        elif status == "expirados":
+            query = db.query(Pedido).filter(Pedido.status == "expired")
+            if bot_id:
+                query = query.filter(Pedido.bot_id == bot_id)
+            
+            total = query.count()
+            pedidos = query.offset(offset).limit(per_page).all()
+            
+            contacts = [{
+                "id": p.id,
+                "telegram_id": p.telegram_id,
+                "first_name": p.first_name,
+                "username": p.username,
+                "plano_nome": p.plano_nome,
+                "valor": p.valor,
+                "status": p.status,
+                "role": "user",
+                "custom_expiration": p.custom_expiration,
+                "created_at": p.created_at
+            } for p in pedidos]
+            
+            return {
+                "data": contacts,
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+                "total_pages": (total + per_page - 1) // per_page
+            }
+        
+        else:
+            return {"data": [], "total": 0, "page": 1, "per_page": per_page, "total_pages": 0}
+            
     except Exception as e:
-        logger.error(f"Erro ao listar contatos: {str(e)}")
+        logger.error(f"Erro ao buscar contatos: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # --- ROTAS FLOW V2 (HÍBRIDO) ---
 @app.get("/api/admin/bots/{bot_id}/flow")
@@ -2073,91 +2055,121 @@ class IndividualRemarketingRequest(BaseModel):
 # ============================================================
 
 @app.post("/api/admin/remarketing/send-individual")
-def enviar_remarketing_individual(payload: IndividualRemarketingRequest, db: Session = Depends(get_db)):
+async def send_individual_remarketing(
+    payload: dict,
+    db: Session = Depends(get_db)
+):
     """
-    Envia uma campanha de remarketing individual
-    
-    CORREÇÃO: Parseia corretamente o campo config (JSON)
+    🔥 [CORRIGIDO] Envia campanha individual para um usuário específico
     """
     try:
-        # 1. Busca campanha
-        campanha = db.query(RemarketingCampaign).filter(
-            RemarketingCampaign.id == payload.campaign_history_id
+        bot_id = payload.get("bot_id")
+        user_telegram_id = str(payload.get("user_telegram_id"))
+        campaign_history_id = payload.get("campaign_history_id")
+        
+        # Validações
+        if not all([bot_id, user_telegram_id, campaign_history_id]):
+            raise HTTPException(
+                status_code=400,
+                detail="Campos obrigatórios: bot_id, user_telegram_id, campaign_history_id"
+            )
+        
+        # Buscar bot
+        bot = db.query(Bot).filter(Bot.id == bot_id).first()
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot não encontrado")
+        
+        # Buscar campanha no histórico
+        campaign = db.query(RemarketingCampaign).filter(
+            RemarketingCampaign.id == campaign_history_id
         ).first()
         
-        if not campanha:
-            raise HTTPException(404, "Campanha não encontrada")
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campanha não encontrada")
         
-        # 2. Parseia o JSON config
-        config = {}
-        if campanha.config:
-            try:
-                # Tenta parsear uma vez
-                config = json.loads(campanha.config) if isinstance(campanha.config, str) else campanha.config
-                
-                # Se ainda for string, parseia de novo (JSON dentro de JSON)
-                if isinstance(config, str):
-                    config = json.loads(config)
-            except Exception as e:
-                logger.error(f"Erro ao parsear config: {e}")
-                logger.error(f"Config raw: {campanha.config[:200] if campanha.config else 'None'}")
-                raise HTTPException(400, f"Config da campanha inválido: {str(e)}")
+        # Parsear config da campanha
+        try:
+            config = json.loads(campaign.config) if isinstance(campaign.config, str) else campaign.config
+        except Exception as e:
+            logger.error(f"Erro ao parsear config da campanha: {e}")
+            raise HTTPException(status_code=400, detail="Configuração da campanha inválida")
         
-        # 3. Extrai mensagem e mídia
-        msg = config.get("msg", "").strip()
-        media = config.get("media", "").strip()
+        # Extrair dados da campanha
+        mensagem = config.get("mensagem", "")
+        media_url = config.get("media_url")
+        incluir_oferta = config.get("incluir_oferta", False)
+        plano_oferta_id = config.get("plano_oferta_id")
         
-        # Validação: Mensagem não pode estar vazia
-        if not msg:
-            logger.error(f"Config parseado: {config}")
-            raise HTTPException(400, "Campanha não tem mensagem configurada")
+        if not mensagem:
+            raise HTTPException(status_code=400, detail="Mensagem da campanha não encontrada")
         
-        # 4. Busca bot
-        bot_db = db.query(Bot).filter(Bot.id == payload.bot_id).first()
-        if not bot_db:
-            raise HTTPException(404, "Bot não encontrado")
-        
-        sender = telebot.TeleBot(bot_db.token)
-        
-        # 5. Monta botão (se tiver plano)
-        markup = None
-        if campanha.plano_id:
-            plano = db.query(PlanoConfig).filter(PlanoConfig.id == campanha.plano_id).first()
+        # Buscar plano se houver oferta
+        plan_data = None
+        if incluir_oferta and plano_oferta_id:
+            plano = db.query(PlanoConfig).filter(PlanoConfig.id == int(plano_oferta_id)).first()
             if plano:
-                markup = types.InlineKeyboardMarkup()
-                preco = campanha.promo_price or plano.preco_atual
-                btn_text = f"🔥 {plano.nome_exibicao} - R$ {preco:.2f}"
-                markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"checkout_{plano.id}"))
+                price_mode = config.get("price_mode", "original")
+                custom_price = config.get("custom_price", 0)
+                
+                plan_data = {
+                    "id": plano.id,
+                    "nome": plano.nome_exibicao,
+                    "preco": custom_price if price_mode == "custom" else plano.preco_atual,
+                    "dias": plano.dias_duracao
+                }
         
-        # 6. Envia mensagem
-        if media:
-            try:
-                # Tenta enviar com mídia
-                if media.lower().endswith(('.mp4', '.mov', '.avi')):
-                    sender.send_video(payload.user_telegram_id, media, caption=msg, reply_markup=markup)
+        # Enviar mensagem
+        try:
+            bot_instance = telegram.Bot(token=bot.token)
+            
+            # Montar texto com oferta se houver
+            texto_final = mensagem
+            if plan_data:
+                texto_final += f"\n\n💎 **Oferta Especial**\n"
+                texto_final += f"{plan_data['nome']} - R$ {plan_data['preco']:.2f}"
+            
+            # Enviar mídia ou texto
+            if media_url:
+                if media_url.lower().endswith(('.mp4', '.avi', '.mov')):
+                    await bot_instance.send_video(
+                        chat_id=user_telegram_id,
+                        video=media_url,
+                        caption=texto_final,
+                        parse_mode='Markdown'
+                    )
                 else:
-                    sender.send_photo(payload.user_telegram_id, media, caption=msg, reply_markup=markup)
-            except Exception as e_media:
-                # Se falhar, envia só texto
-                logger.warning(f"Falha ao enviar mídia: {e_media}")
-                sender.send_message(payload.user_telegram_id, msg, reply_markup=markup, parse_mode="HTML")
-        else:
-            # Envia só texto
-            sender.send_message(payload.user_telegram_id, msg, reply_markup=markup, parse_mode="HTML")
-        
-        logger.info(f"✅ Campanha individual enviada para {payload.user_telegram_id}")
-        
-        return {
-            "status": "ok",
-            "message": "Campanha enviada com sucesso",
-            "user_id": payload.user_telegram_id
-        }
-    
+                    await bot_instance.send_photo(
+                        chat_id=user_telegram_id,
+                        photo=media_url,
+                        caption=texto_final,
+                        parse_mode='Markdown'
+                    )
+            else:
+                await bot_instance.send_message(
+                    chat_id=user_telegram_id,
+                    text=texto_final,
+                    parse_mode='Markdown'
+                )
+            
+            logger.info(f"✅ Mensagem individual enviada para {user_telegram_id}")
+            
+            return {
+                "success": True,
+                "message": f"Mensagem enviada com sucesso para {user_telegram_id}"
+            }
+            
+        except telegram.error.TelegramError as e:
+            logger.error(f"Erro ao enviar mensagem individual: {e}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Erro ao enviar mensagem: {str(e)}"
+            )
+            
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Erro envio individual: {e}")
-        raise HTTPException(500, f"Erro ao enviar: {str(e)}")
+        logger.error(f"Erro inesperado no envio individual: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # =========================================================
 # 📢 LÓGICA DE REMARKETING (ALINHADA COM O FRONTEND + LÓGICA DE CONJUNTOS)
