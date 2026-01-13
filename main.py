@@ -1467,37 +1467,74 @@ async def receber_update_telegram(bot_token: str, request: Request, db: Session 
             bot_temp.answer_callback_query(update.callback_query.id)
 
         # ============================================================
-        # TRECHO COMPLETO CORRIGIDO - PROMOÇÕES + CHECKOUT PADRÃO
-        # ============================================================
+# 🔥 CORREÇÃO: Handler promo_ com LOGS DETALHADOS
+# LOCALIZAÇÃO: Linha 1474-1587
+# PROBLEMA: "Oferta não encontrada" mesmo com UUID correto
+# SOLUÇÃO: Adicionar logs + Verificações
+# ============================================================
 
-        # --- PROMOÇÕES (CORRIGIDO) ---
+# SUBSTITUA TODO O BLOCO de linhas 1474-1587 por este:
+
         elif update.callback_query and update.callback_query.data.startswith("promo_"):
             chat_id = update.callback_query.message.chat.id
             first_name = update.callback_query.from_user.first_name
             username = update.callback_query.from_user.username
             campanha_uuid = update.callback_query.data.split("_")[1]
             
+            # 🔥 [DEBUG] Log do UUID recebido
+            logger.info(f"🔍 [WEBHOOK] Callback promo recebido - UUID: {campanha_uuid}")
+            logger.info(f"👤 [WEBHOOK] Usuário: {chat_id} ({first_name})")
+            
+            # Buscar campanha pelo UUID
             campanha = db.query(RemarketingCampaign).filter(
                 RemarketingCampaign.campaign_id == campanha_uuid
             ).first()
             
-            if not campanha or not campanha.plano_id:
+            # 🔥 [DEBUG] Log do resultado da busca
+            if campanha:
+                logger.info(f"✅ [WEBHOOK] Campanha encontrada - ID: {campanha.id}, plano_id: {campanha.plano_id}")
+            else:
+                logger.error(f"❌ [WEBHOOK] Campanha NÃO encontrada com UUID: {campanha_uuid}")
+                
+                # DEBUG: Listar todas as campanhas para comparar
+                todas = db.query(RemarketingCampaign).limit(5).all()
+                logger.error(f"📋 [WEBHOOK] Últimas 5 campanhas no banco:")
+                for c in todas:
+                    logger.error(f"   - ID: {c.id}, campaign_id: {c.campaign_id}, plano_id: {c.plano_id}")
+            
+            # Verificações
+            if not campanha:
+                logger.error(f"❌ [WEBHOOK] Campanha não existe no banco")
                 bot_temp.answer_callback_query(update.callback_query.id, "Oferta não encontrada.")
+                bot_temp.send_message(chat_id, "❌ Esta oferta não está mais disponível.")
+                return {"status": "error"}
+            
+            if not campanha.plano_id:
+                logger.error(f"❌ [WEBHOOK] Campanha {campanha.id} não tem plano_id")
+                bot_temp.answer_callback_query(update.callback_query.id, "Plano não configurado.")
+                bot_temp.send_message(chat_id, "❌ Esta oferta não está configurada corretamente.")
                 return {"status": "error"}
 
             # Verifica se a oferta expirou
             if campanha.expiration_at and datetime.utcnow() > campanha.expiration_at:
+                logger.info(f"⏰ [WEBHOOK] Campanha {campanha.id} expirou em {campanha.expiration_at}")
                 msg_esgotado = "🚫 **OFERTA ENCERRADA!**\n\nO tempo da oferta acabou."
                 bot_temp.send_message(chat_id, msg_esgotado, parse_mode="Markdown")
                 bot_temp.answer_callback_query(update.callback_query.id, "Oferta expirada!")
                 return {"status": "expired"}
 
+            # Buscar plano
             plano = db.query(PlanoConfig).filter(PlanoConfig.id == campanha.plano_id).first()
             if not plano:
+                logger.error(f"❌ [WEBHOOK] Plano {campanha.plano_id} não encontrado")
                 bot_temp.send_message(chat_id, "❌ Plano não encontrado.")
                 return {"status": "error"}
             
+            logger.info(f"✅ [WEBHOOK] Plano encontrado: {plano.nome_exibicao}")
+            
+            # Calcular preço final
             preco_final = campanha.promo_price if campanha.promo_price else plano.preco_atual
+            logger.info(f"💰 [WEBHOOK] Preço final: R$ {preco_final:.2f}")
             
             msg_aguarde = bot_temp.send_message(chat_id, f"⏳ Gerando oferta de R$ {preco_final:.2f}...")
             
@@ -1509,17 +1546,14 @@ async def receber_update_telegram(bot_token: str, request: Request, db: Session 
                 provider_id = pix_data.get("id") or temp_uuid
                 final_tx_id = str(provider_id).lower()
 
-                # ============================================================
                 # [CORREÇÃO] ANTI-DUPLICAÇÃO - VERIFICA SE USUÁRIO JÁ EXISTE
-                # ============================================================
                 pedido_existente = db.query(Pedido).filter(
                     Pedido.telegram_id == str(chat_id),
                     Pedido.bot_id == bot_db.id
                 ).first()
 
                 if pedido_existente:
-                    # [CORREÇÃO] ATUALIZA o pedido existente
-                    logger.info(f"📝 [BOT {bot_db.id}] Usuário {chat_id} já existe. Atualizando pedido (PROMO)...")
+                    logger.info(f"📝 [WEBHOOK] Atualizando pedido existente para {chat_id}")
                     
                     pedido_existente.plano_nome = f"{plano.nome_exibicao} (OFERTA)"
                     pedido_existente.plano_id = plano.id
@@ -1530,17 +1564,15 @@ async def receber_update_telegram(bot_token: str, request: Request, db: Session 
                     pedido_existente.data_aprovacao = None
                     pedido_existente.created_at = datetime.utcnow()
                     
-                    # Se tinha custom_expiration e agora é vitalício, remove
                     if plano.dias_duracao == 99999:
                         pedido_existente.custom_expiration = None
                     
                     db.commit()
                     db.refresh(pedido_existente)
                     
-                    logger.info(f"✅ [BOT {bot_db.id}] Pedido atualizado para {chat_id} (PROMO)")
+                    logger.info(f"✅ [WEBHOOK] Pedido atualizado para {chat_id}")
                 else:
-                    # [MANTÉM] Se não existe, cria um novo
-                    logger.info(f"🆕 [BOT {bot_db.id}] Criando primeiro pedido para {chat_id} (PROMO)...")
+                    logger.info(f"🆕 [WEBHOOK] Criando novo pedido para {chat_id}")
                     
                     novo_pedido = Pedido(
                         bot_id=bot_db.id,
@@ -1559,14 +1591,14 @@ async def receber_update_telegram(bot_token: str, request: Request, db: Session 
                     db.commit()
                     db.refresh(novo_pedido)
                     
-                    logger.info(f"✅ [BOT {bot_db.id}] Pedido criado para {chat_id} (PROMO)")
+                    logger.info(f"✅ [WEBHOOK] Pedido criado para {chat_id}")
 
                 try: 
                     bot_temp.delete_message(chat_id, msg_aguarde.message_id)
                 except: 
                     pass
 
-                # Manda o PIX Bonitinho (PROMOÇÃO)
+                # Envia o PIX
                 legenda_pix = f"""🎉 **OFERTA ATIVADA COM SUCESSO!**
 🎁 Plano: {plano.nome_exibicao}
 💸 **Valor Promocional: R$ {preco_final:.2f}**
@@ -1581,7 +1613,9 @@ Copie o código abaixo para garantir sua vaga:
 ⏳ Pague agora antes que expire!"""
 
                 bot_temp.send_message(chat_id, legenda_pix, parse_mode="Markdown")
+                logger.info(f"✅ [WEBHOOK] PIX enviado para {chat_id}")
             else:
+                logger.error(f"❌ [WEBHOOK] Erro ao gerar PIX")
                 bot_temp.send_message(chat_id, "❌ Erro ao gerar oferta.")
 
             bot_temp.answer_callback_query(update.callback_query.id)
@@ -2373,23 +2407,30 @@ def processar_envio_remarketing(bot_id: int, payload: RemarketingRequest, db: Se
     # Salvar no banco
     nova_campanha = RemarketingCampaign(
         bot_id=bot_id,
-        campaign_id=uuid_campanha,
-        target=filtro_limpo,  # Salva o target correto
+        campaign_id=uuid_campanha,  # ✅ UUID para busca no webhook
+        target=filtro_limpo,
         config=json.dumps({
             "mensagem": payload.mensagem,
             "media_url": payload.media_url,
             "incluir_oferta": payload.incluir_oferta,
-            "plano_oferta_id": payload.plano_oferta_id
+            "plano_oferta_id": payload.plano_oferta_id,
+            "price_mode": payload.price_mode,              # 🔥 NOVO
+            "custom_price": payload.custom_price,          # 🔥 NOVO
+            "expiration_mode": payload.expiration_mode,    # 🔥 NOVO
+            "expiration_value": payload.expiration_value   # 🔥 NOVO
         }),
         total_leads=len(lista_final_ids),
-        sent_success=sent_count,  # NÃO "sent"
-        blocked_count=blocked_count,  # NÃO "blocked"
-        data_envio=datetime.utcnow()
+        sent_success=sent_count,
+        blocked_count=blocked_count,
+        data_envio=datetime.utcnow(),
+        plano_id=plano_db.id if plano_db else None,       # 🔥 CRÍTICO - FALTAVA ISSO!
+        promo_price=preco_final if plano_db else None,    # 🔥 CRÍTICO - FALTAVA ISSO!
+        expiration_at=data_expiracao                       # 🔥 NOVO
     )
     db.add(nova_campanha)
     db.commit()
-
-
+    
+    logger.info(f"✅ CAMPANHA SALVA - ID: {nova_campanha.id}, UUID: {uuid_campanha}, plano_id: {nova_campanha.plano_id}")
     logger.info(f"✅ FINALIZADO: {sent_count} enviados / {blocked_count} bloqueados")
 
 # --- ROTAS DA API ---
