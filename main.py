@@ -530,6 +530,7 @@ class PlanoCreate(BaseModel):
     dias_duracao: int
 
 # --- Adicione logo após a classe PlanoCreate ---
+# 👇 COLE ISSO LOGO ABAIXO DA CLASS 'PlanoCreate'
 class PlanoUpdate(BaseModel):
     nome_exibicao: Optional[str] = None
     preco: Optional[float] = None
@@ -929,8 +930,9 @@ def del_plano(pid: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=f"Erro ao deletar: {str(e)}")
 
 # --- ROTA NOVA: ATUALIZAR PLANO ---
+# --- ROTA NOVA: ATUALIZAR PLANO ---
 @app.put("/api/admin/plans/{plan_id}")
-def atualizar_plano(plan_id: int, dados: PlanoUpdate, db: Session = Depends(get_db)):
+def atualizar_plano(plan_id: int, dados: PlanoUpdate, db: Session = Depends(get_db)): # <--- TEM QUE SER PlanoUpdate AQUI
     plano = db.query(PlanoConfig).filter(PlanoConfig.id == plan_id).first()
     if not plano:
         raise HTTPException(status_code=404, detail="Plano não encontrado")
@@ -940,11 +942,10 @@ def atualizar_plano(plan_id: int, dados: PlanoUpdate, db: Session = Depends(get_
     
     if dados.preco is not None:
         plano.preco_atual = dados.preco
-        plano.preco_cheio = dados.preco * 2 # Atualiza o preço "de/por" automaticamente
+        plano.preco_cheio = dados.preco * 2 
         
     if dados.dias_duracao is not None:
         plano.dias_duracao = dados.dias_duracao
-        # Atualiza a key interna para manter consistência
         plano.key_id = f"plan_{plano.bot_id}_{dados.dias_duracao}d"
         plano.descricao = f"Acesso de {dados.dias_duracao} dias"
 
