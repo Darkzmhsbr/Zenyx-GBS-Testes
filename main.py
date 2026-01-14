@@ -531,10 +531,15 @@ class PlanoCreate(BaseModel):
 
 # --- Adicione logo após a classe PlanoCreate ---
 # 👇 COLE ISSO LOGO ABAIXO DA CLASS 'PlanoCreate'
+# COLE AQUI (LOGO APÓS AS CLASSES INICIAIS)
 class PlanoUpdate(BaseModel):
     nome_exibicao: Optional[str] = None
     preco: Optional[float] = None
     dias_duracao: Optional[int] = None
+    
+    # Adiciona essa config para permitir que o Pydantic ignore tipos estranhos se possível
+    class Config:
+        arbitrary_types_allowed = True
 class FlowUpdate(BaseModel):
     msg_boas_vindas: str
     media_url: Optional[str] = None
@@ -930,13 +935,15 @@ def del_plano(pid: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=f"Erro ao deletar: {str(e)}")
 
 # --- ROTA NOVA: ATUALIZAR PLANO ---
+@app.put("/api/admin/plans/{plan_id}")
 # --- ROTA NOVA: ATUALIZAR PLANO ---
 @app.put("/api/admin/plans/{plan_id}")
-def atualizar_plano(plan_id: int, dados: PlanoUpdate, db: Session = Depends(get_db)): # <--- TEM QUE SER PlanoUpdate AQUI
+def atualizar_plano(plan_id: int, dados: PlanoUpdate, db: Session = Depends(get_db)):
     plano = db.query(PlanoConfig).filter(PlanoConfig.id == plan_id).first()
     if not plano:
         raise HTTPException(status_code=404, detail="Plano não encontrado")
     
+    # Atualiza apenas se o campo foi enviado e não é None
     if dados.nome_exibicao is not None:
         plano.nome_exibicao = dados.nome_exibicao
     
