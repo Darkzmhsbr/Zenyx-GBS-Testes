@@ -1874,12 +1874,17 @@ async def get_contacts(
         
         # FILTRO: TODOS - Busca LEADS + PEDIDOS
         if status == "todos":
-            # 1. Buscar LEADS (tabela Lead)
-            query_leads = db.query(Lead)
-            if bot_id:
-                query_leads = query_leads.filter(Lead.bot_id == bot_id)
-            
+            # 1. Busca PEDIDOS primeiro
+            pedidos = query_pedidos.all()
+
+            # 2. Coletar IDs dos usuários que JÁ TEM pedido
+            telegram_ids_com_pedido = {p.telegram_id for p in pedidos}
+
+            # 3. Busca LEADS - EXCLUINDO quem já tem pedido
+            query_leads = query_leads.filter(~Lead.user_id.in_(telegram_ids_com_pedido))
             leads = query_leads.all()
+
+            # Resultado: Cada usuário aparece 1x!
             
             # Normalizar leads para o formato de contato
             for lead in leads:
@@ -3089,7 +3094,7 @@ async def tg_wh(token: str, req: Request, db: Session = Depends(get_db)):
             elif dat == "go_checkout":
                 enviar_oferta_final(tb, cid, b.fluxo, b.id, db)
 
-            # --- CHECKOUT (GERAR PIX) ---
+           # --- CHECKOUT (GERAR PIX) ---
             elif dat.startswith("checkout_"):
                 pid = dat.split("_")[1]
                 pl = db.query(PlanoConfig).filter(PlanoConfig.id == pid).first()
@@ -3100,17 +3105,45 @@ async def tg_wh(token: str, req: Request, db: Session = Depends(get_db)):
                     if pix:
                         qr = pix.get('qr_code_text') or pix.get('qr_code')
                         txid = str(pix.get('id') or mytx).lower()
-                        np = Pedido(
-                            bot_id=b.id, telegram_id=str(cid),
-                            first_name=call.from_user.first_name, 
-                            username=call.from_user.username,
-                            plano_nome=pl.nome_exibicao, 
-                            plano_id=pl.id, 
-                            valor=pl.preco_atual,
-                            txid=txid, qr_code=qr, status="pending"
-                        )
-                        db.add(np)
-                        db.commit()
+                        
+                        # 🔥 [NOVO] Verificar se pedido já existe
+                        pedido_existente = db.query(Pedido).filter(
+                            Pedido.telegram_id == str(cid),
+                            Pedido.bot_id == b.id
+                        ).first()
+                        
+                        if pedido_existente:
+                            # ✅ ATUALIZA o pedido existente
+                            logger.info(f"🔄 Atualizando pedido existente para {cid}")
+                            pedido_existente.plano_nome = pl.nome_exibicao
+                            pedido_existente.plano_id = pl.id
+                            pedido_existente.valor = pl.preco_atual
+                            pedido_existente.transaction_id = txid
+                            pedido_existente.qr_code = qr
+                            pedido_existente.status = "pending"
+                            pedido_existente.data_aprovacao = None
+                            pedido_existente.created_at = datetime.utcnow()
+                            db.commit()
+                            db.refresh(pedido_existente)
+                        else:
+                            # ✅ CRIA novo pedido (primeira vez)
+                            logger.info(f"🆕 Criando primeiro pedido para {cid}")
+                            np = Pedido(
+                                bot_id=b.id, 
+                                telegram_id=str(cid),
+                                first_name=call.from_user.first_name, 
+                                username=call.from_user.username,
+                                plano_nome=pl.nome_exibicao, 
+                                plano_id=pl.id, 
+                                valor=pl.preco_atual,
+                                transaction_id=txid, 
+                                qr_code=qr, 
+                                status="pending"
+                            )
+                            db.add(np)
+                            db.commit()
+                            db.refresh(np)
+                        
                         try: 
                             tb.delete_message(cid, msg.message_id)
                         except: 
