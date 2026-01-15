@@ -676,38 +676,56 @@ def update_bot(bot_id: int, dados: BotCreate, db: Session = Depends(get_db)):
     # Guarda token antigo para verificar mudança
     old_token = bot_db.token
 
-    # Atualiza campos básicos
-    if dados.nome: bot_db.nome = dados.nome
-    if dados.token: bot_db.token = dados.token
-    if dados.id_canal_vip: bot_db.id_canal_vip = dados.id_canal_vip
+    # 1. Atualiza campos administrativos básicos (Canal e Admin)
+    if dados.id_canal_vip: 
+        bot_db.id_canal_vip = dados.id_canal_vip
     
-    # --- SALVA O ADMIN PRINCIPAL ---
-    # Aceita string vazia para limpar o campo, ou valor novo
     if dados.admin_principal_id is not None: 
         bot_db.admin_principal_id = dados.admin_principal_id
     
-    # Se houver troca de token, atualiza Webhook
+    # 2. LÓGICA DE TROCA DE TOKEN (COM AUTO-ATUALIZAÇÃO DE NOME E USERNAME)
     if dados.token and dados.token != old_token:
         try:
-            # 1. Tenta remover webhook do token antigo
+            logger.info(f"🔄 Detectada troca de token para o bot ID {bot_id}...")
+            
+            # A) Conecta com o NOVO token para validar e pegar dados reais
+            new_tb = telebot.TeleBot(dados.token)
+            bot_info = new_tb.get_me() # <--- A MÁGICA ACONTECE AQUI
+            
+            # B) Atualiza Token, Nome e Username baseados no Telegram
+            bot_db.token = dados.token
+            bot_db.nome = bot_info.first_name # Atualiza o nome automaticamente
+            bot_db.username = bot_info.username # Atualiza o @ automaticamente
+            
+            logger.info(f"✅ Dados atualizados via Telegram: {bot_db.nome} (@{bot_db.username})")
+
+            # C) Remove o Webhook do token ANTIGO (Limpeza)
             try:
                 old_tb = telebot.TeleBot(old_token)
                 old_tb.delete_webhook()
-            except: pass
+            except: 
+                pass
 
-            # 2. Configura o novo webhook
-            tb = telebot.TeleBot(dados.token)
+            # D) Configura o Webhook no NOVO token
             public_url = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-production.up.railway.app")
+            # Remove https:// se vier duplicado da env var
             if public_url.startswith("https://"): public_url = public_url.replace("https://", "")
             
             webhook_url = f"https://{public_url}/webhook/{dados.token}"
-            tb.set_webhook(url=webhook_url)
+            new_tb.set_webhook(url=webhook_url)
             
-            logger.info(f"♻️ Webhook atualizado para o bot {bot_db.nome}")
+            logger.info(f"♻️ Webhook atualizado com sucesso para: {webhook_url}")
             bot_db.status = "ativo" # Reseta para ativo ao trocar token
+            
         except Exception as e:
-            logger.error(f"Erro ao atualizar webhook: {e}")
-            bot_db.status = "erro_token"
+            logger.error(f"❌ Erro ao validar novo token: {e}")
+            # Se o token for inválido, não salvamos a troca para não quebrar o bot
+            raise HTTPException(status_code=400, detail=f"Token inválido ou erro de conexão com Telegram: {str(e)}")
+            
+    else:
+        # Se NÃO trocou o token, permite atualizar o nome manualmente pelo input
+        if dados.nome: 
+            bot_db.nome = dados.nome
     
     db.commit()
     db.refresh(bot_db)
