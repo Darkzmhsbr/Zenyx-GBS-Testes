@@ -252,6 +252,9 @@ def on_startup():
                 "ALTER TABLE bot_flows ADD COLUMN IF NOT EXISTS msg_2_media VARCHAR;",
                 "ALTER TABLE bot_flows ADD COLUMN IF NOT EXISTS mostrar_planos_2 BOOLEAN DEFAULT TRUE;",
                 
+                # --- [CORREÇÃO NOVA] MOSTRAR PLANOS NO PASSO 1 ---
+                "ALTER TABLE bot_flows ADD COLUMN IF NOT EXISTS mostrar_planos_1 BOOLEAN DEFAULT FALSE;",
+                
                 # --- [CORREÇÃO 4] REMARKETING AVANÇADO (CRÍTICO) ---
                 "ALTER TABLE remarketing_campaigns ADD COLUMN IF NOT EXISTS target VARCHAR DEFAULT 'todos';",
                 "ALTER TABLE remarketing_campaigns ADD COLUMN IF NOT EXISTS type VARCHAR DEFAULT 'massivo';",
@@ -548,6 +551,7 @@ class FlowUpdate(BaseModel):
     msg_2_texto: Optional[str] = None
     msg_2_media: Optional[str] = None
     mostrar_planos_2: bool
+    mostrar_planos_1: Optional[bool] = False # 🔥 NOVO CAMPO
 
 class FlowStepCreate(BaseModel):
     msg_texto: str
@@ -971,7 +975,8 @@ def obter_fluxo(bot_id: int, db: Session = Depends(get_db)):
             "autodestruir_1": False,
             "msg_2_texto": "Escolha seu plano abaixo:",
             "msg_2_media": "",
-            "mostrar_planos_2": True
+            "mostrar_planos_2": True,
+            "mostrar_planos_1": False # Padrão
         }
     return fluxo
 
@@ -989,6 +994,7 @@ def salvar_fluxo(bot_id: int, flow: FlowUpdate, db: Session = Depends(get_db)):
     fluxo_db.msg_2_texto = flow.msg_2_texto
     fluxo_db.msg_2_media = flow.msg_2_media
     fluxo_db.mostrar_planos_2 = flow.mostrar_planos_2
+    fluxo_db.mostrar_planos_1 = flow.mostrar_planos_1 # Salva o novo campo
     
     db.commit()
     return {"status": "saved"}
@@ -1274,23 +1280,51 @@ async def receber_update_telegram(bot_token: str, request: Request, db: Session 
             # Buscar fluxo
             fluxo = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
             texto = fluxo.msg_boas_vindas if fluxo else f"Olá! Eu sou o {bot_db.nome}."
-            btn_txt = fluxo.btn_text_1 if (fluxo and fluxo.btn_text_1) else "🔓 DESBLOQUEAR ACESSO"
-            
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton(text=btn_txt, callback_data="passo_2"))
-
             media = fluxo.media_url if (fluxo and fluxo.media_url) else None
-            if media:
+            
+            # 🔥 LÓGICA NOVA: SE MOSTRAR PLANOS ESTIVER ATIVO NA MENSAGEM 1
+            if fluxo and hasattr(fluxo, 'mostrar_planos_1') and fluxo.mostrar_planos_1:
+                logger.info(f"💎 [BOT {bot_db.id}] Mostrar Planos na msg 1 ativado. Exibindo checkout direto.")
+                
+                # Cria botões de planos direto aqui
+                mk = types.InlineKeyboardMarkup()
+                planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_db.id).all()
+                for p in planos:
+                    mk.add(types.InlineKeyboardButton(
+                        f"💎 {p.nome_exibicao} - R$ {p.preco_atual:.2f}", 
+                        callback_data=f"checkout_{p.id}"
+                    ))
+                
+                # Envia mensagem com os planos
                 try:
-                    if media.lower().endswith(('.mp4', '.mov', '.avi')):
-                        bot_temp.send_video(chat_id, media, caption=texto, reply_markup=markup)
+                    if media:
+                        if media.lower().endswith(('.mp4', '.mov', '.avi')):
+                            bot_temp.send_video(chat_id, media, caption=texto, reply_markup=mk)
+                        else:
+                            bot_temp.send_photo(chat_id, media, caption=texto, reply_markup=mk)
                     else:
-                        bot_temp.send_photo(chat_id, media, caption=texto, reply_markup=markup)
+                        bot_temp.send_message(chat_id, texto, reply_markup=mk)
                 except Exception as e:
-                    logger.error(f"Erro mídia 1: {e}")
-                    bot_temp.send_message(chat_id, texto, reply_markup=markup)
+                    logger.error(f"Erro mídia 1 (com planos): {e}")
+                    bot_temp.send_message(chat_id, texto, reply_markup=mk)
+                    
             else:
-                bot_temp.send_message(chat_id, texto, reply_markup=markup)
+                # Lógica Padrão (Botão Desbloquear)
+                btn_txt = fluxo.btn_text_1 if (fluxo and fluxo.btn_text_1) else "🔓 DESBLOQUEAR ACESSO"
+                markup = types.InlineKeyboardMarkup()
+                markup.add(types.InlineKeyboardButton(text=btn_txt, callback_data="passo_2"))
+
+                if media:
+                    try:
+                        if media.lower().endswith(('.mp4', '.mov', '.avi')):
+                            bot_temp.send_video(chat_id, media, caption=texto, reply_markup=markup)
+                        else:
+                            bot_temp.send_photo(chat_id, media, caption=texto, reply_markup=markup)
+                    except Exception as e:
+                        logger.error(f"Erro mídia 1: {e}")
+                        bot_temp.send_message(chat_id, texto, reply_markup=markup)
+                else:
+                    bot_temp.send_message(chat_id, texto, reply_markup=markup)
 
         # ============================================================
         # TRECHO 1: CALLBACK "passo_2"
