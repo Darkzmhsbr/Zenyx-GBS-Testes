@@ -125,6 +125,9 @@ class BotFlow(Base):
     btn_text_1 = Column(String, default="🔓 DESBLOQUEAR")
     autodestruir_1 = Column(Boolean, default=False)
     
+    # 🔥 NOVO CAMPO: Mostrar Planos na Msg 1 (ADICIONADO AQUI)
+    mostrar_planos_1 = Column(Boolean, default=False)
+    
     # Passo Final (Fixo)
     msg_2_texto = Column(Text, nullable=True)
     msg_2_media = Column(String, nullable=True)
