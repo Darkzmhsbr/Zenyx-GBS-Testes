@@ -233,12 +233,12 @@ def on_startup():
             logger.info("🔧 [STARTUP] Verificando integridade completa do banco...")
             
             comandos_sql = [
-                # --- [CORREÇÃO 1] TABELA DE PLANOS (Causa do erro ao Criar Plano) ---
+                # --- [CORREÇÃO 1] TABELA DE PLANOS ---
                 "ALTER TABLE planos_config ADD COLUMN IF NOT EXISTS key_id VARCHAR;",
                 "ALTER TABLE planos_config ADD COLUMN IF NOT EXISTS descricao TEXT;",
                 "ALTER TABLE planos_config ADD COLUMN IF NOT EXISTS preco_cheio FLOAT;",
 
-                # --- [CORREÇÃO 2] TABELA DE PEDIDOS (Datas e Frontend) ---
+                # --- [CORREÇÃO 2] TABELA DE PEDIDOS ---
                 "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS plano_id INTEGER;",
                 "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS plano_nome VARCHAR;",
                 "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS txid VARCHAR;",
@@ -250,16 +250,14 @@ def on_startup():
                 "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS link_acesso VARCHAR;",
                 "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS mensagem_enviada BOOLEAN DEFAULT FALSE;",
 
-                # --- [CORREÇÃO 3] FLUXO DE MENSAGENS (Antigo mas necessário) ---
+                # --- [CORREÇÃO 3] FLUXO DE MENSAGENS ---
                 "ALTER TABLE bot_flows ADD COLUMN IF NOT EXISTS autodestruir_1 BOOLEAN DEFAULT FALSE;",
                 "ALTER TABLE bot_flows ADD COLUMN IF NOT EXISTS msg_2_texto TEXT;",
                 "ALTER TABLE bot_flows ADD COLUMN IF NOT EXISTS msg_2_media VARCHAR;",
                 "ALTER TABLE bot_flows ADD COLUMN IF NOT EXISTS mostrar_planos_2 BOOLEAN DEFAULT TRUE;",
-                
-                # --- [CORREÇÃO NOVA] MOSTRAR PLANOS NO PASSO 1 ---
                 "ALTER TABLE bot_flows ADD COLUMN IF NOT EXISTS mostrar_planos_1 BOOLEAN DEFAULT FALSE;",
                 
-                # --- [CORREÇÃO 4] REMARKETING AVANÇADO (CRÍTICO) ---
+                # --- [CORREÇÃO 4] REMARKETING AVANÇADO ---
                 "ALTER TABLE remarketing_campaigns ADD COLUMN IF NOT EXISTS target VARCHAR DEFAULT 'todos';",
                 "ALTER TABLE remarketing_campaigns ADD COLUMN IF NOT EXISTS type VARCHAR DEFAULT 'massivo';",
                 "ALTER TABLE remarketing_campaigns ADD COLUMN IF NOT EXISTS plano_id INTEGER;",
@@ -282,10 +280,10 @@ def on_startup():
                 );
                 """,
                 
-                # --- [CORREÇÃO 6] SUPORTE NO BOT (MENU) ---
+                # --- [CORREÇÃO 6] SUPORTE NO BOT ---
                 "ALTER TABLE bots ADD COLUMN IF NOT EXISTS suporte_username VARCHAR;",
 
-                # --- [CORREÇÃO 7] TABELAS DE TRACKING (RASTREAMENTO) ---
+                # --- [CORREÇÃO 7] TABELAS DE TRACKING ---
                 """
                 CREATE TABLE IF NOT EXISTS tracking_folders (
                     id SERIAL PRIMARY KEY,
@@ -309,9 +307,44 @@ def on_startup():
                     created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT now()
                 );
                 """,
-                # Colunas de vínculo
                 "ALTER TABLE leads ADD COLUMN IF NOT EXISTS tracking_id INTEGER REFERENCES tracking_links(id);",
-                "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS tracking_id INTEGER REFERENCES tracking_links(id);"
+                "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS tracking_id INTEGER REFERENCES tracking_links(id);",
+
+                # --- [CORREÇÃO 8] 🔥 TABELAS DA LOJA (MINI APP) - ADICIONADO AGORA ---
+                """
+                CREATE TABLE IF NOT EXISTS miniapp_config (
+                    bot_id INTEGER PRIMARY KEY REFERENCES bots(id),
+                    logo_url VARCHAR,
+                    background_type VARCHAR DEFAULT 'solid',
+                    background_value VARCHAR DEFAULT '#000000',
+                    hero_video_url VARCHAR,
+                    hero_title VARCHAR DEFAULT 'ACERVO PREMIUM',
+                    hero_subtitle VARCHAR DEFAULT 'O maior acervo da internet.',
+                    hero_btn_text VARCHAR DEFAULT 'LIBERAR CONTEÚDO 🔓',
+                    enable_popup BOOLEAN DEFAULT FALSE,
+                    popup_video_url VARCHAR,
+                    popup_text VARCHAR DEFAULT 'VOCÊ GANHOU UM PRESENTE!',
+                    footer_text VARCHAR DEFAULT '© 2026 Premium Club.'
+                );
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS miniapp_categories (
+                    id SERIAL PRIMARY KEY,
+                    bot_id INTEGER REFERENCES bots(id),
+                    slug VARCHAR,
+                    title VARCHAR,
+                    description VARCHAR,
+                    cover_image VARCHAR,
+                    theme_color VARCHAR DEFAULT '#c333ff',
+                    deco_line_url VARCHAR,
+                    is_direct_checkout BOOLEAN DEFAULT FALSE,
+                    is_hacker_mode BOOLEAN DEFAULT FALSE,
+                    banner_desk_url VARCHAR,
+                    banner_mob_url VARCHAR,
+                    footer_banner_url VARCHAR,
+                    content_json TEXT
+                );
+                """
             ]
             
             for cmd in comandos_sql:
