@@ -59,10 +59,13 @@ class Bot(Base):
     steps = relationship("BotFlowStep", back_populates="bot", cascade="all, delete-orphan")
     admins = relationship("BotAdmin", back_populates="bot", cascade="all, delete-orphan")
     
-    # 🔥 NOVOS RELACIONAMENTOS PARA EXCLUSÃO AUTOMÁTICA (Pediu para apagar bot, apaga tudo)
+    # RELACIONAMENTOS PARA EXCLUSÃO AUTOMÁTICA
     pedidos = relationship("Pedido", backref="bot_ref", cascade="all, delete-orphan")
     leads = relationship("Lead", backref="bot_ref", cascade="all, delete-orphan")
     campanhas = relationship("RemarketingCampaign", backref="bot_ref", cascade="all, delete-orphan")
+    
+    # 🔥 [NOVO FASE 1] Relacionamento com Order Bump
+    order_bump = relationship("OrderBumpConfig", uselist=False, back_populates="bot", cascade="all, delete-orphan")
 
 class BotAdmin(Base):
     __tablename__ = "bot_admins"
@@ -72,6 +75,29 @@ class BotAdmin(Base):
     nome = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     bot = relationship("Bot", back_populates="admins")
+
+# =========================================================
+# 🛒 ORDER BUMP (OFERTA EXTRA NO CHECKOUT)
+# =========================================================
+class OrderBumpConfig(Base):
+    __tablename__ = "order_bump_config"
+    id = Column(Integer, primary_key=True, index=True)
+    bot_id = Column(Integer, ForeignKey("bots.id"), unique=True)
+    
+    ativo = Column(Boolean, default=False)
+    nome_produto = Column(String) # Nome do produto extra
+    preco = Column(Float)         # Valor a ser somado
+    link_acesso = Column(String, nullable=True) # Link do canal/grupo extra
+    
+    # Conteúdo da Oferta
+    msg_texto = Column(Text, default="Gostaria de adicionar este item?")
+    msg_media = Column(String, nullable=True)
+    
+    # Botões
+    btn_aceitar = Column(String, default="✅ SIM, ADICIONAR")
+    btn_recusar = Column(String, default="❌ NÃO, OBRIGADO")
+    
+    bot = relationship("Bot", back_populates="order_bump")
 
 # =========================================================
 # 💲 PLANOS
@@ -131,7 +157,7 @@ class BotFlow(Base):
     btn_text_1 = Column(String, default="🔓 DESBLOQUEAR")
     autodestruir_1 = Column(Boolean, default=False)
     
-    # 🔥 NOVO CAMPO: Mostrar Planos na Msg 1
+    # Mostrar Planos na Msg 1
     mostrar_planos_1 = Column(Boolean, default=False)
     
     # Passo Final (Fixo)
@@ -151,18 +177,18 @@ class BotFlowStep(Base):
     msg_media = Column(String, nullable=True)
     btn_texto = Column(String, default="Próximo ▶️")
     
-    # [V3] Controles de comportamento
-    autodestruir = Column(Boolean, default=False)  # Se deve apagar após clicar
-    mostrar_botao = Column(Boolean, default=True)  # Se deve mostrar botão
+    # Controles de comportamento
+    autodestruir = Column(Boolean, default=False)
+    mostrar_botao = Column(Boolean, default=True)
     
-    # [NOVO V4] Temporizador entre mensagens
-    delay_seconds = Column(Integer, default=0)  # Segundos de delay (0 = sem delay)
+    # Temporizador entre mensagens
+    delay_seconds = Column(Integer, default=0)
     
     created_at = Column(DateTime, default=datetime.utcnow)
     bot = relationship("Bot", back_populates="steps")
 
 # =========================================================
-# 🛒 PEDIDOS (ATUALIZADO COM CAMPOS DE FUNIL)
+# 🛒 PEDIDOS (ATUALIZADO COM CAMPOS DE FUNIL E ORDER BUMP)
 # =========================================================
 class Pedido(Base):
     __tablename__ = "pedidos"
@@ -191,8 +217,11 @@ class Pedido(Base):
     
     created_at = Column(DateTime, default=datetime.utcnow)
     
+    # 🔥 [NOVO FASE 1] Campo para identificar se comprou o Order Bump
+    tem_order_bump = Column(Boolean, default=False)
+    
     # ============================================================
-    # 🔥 NOVOS CAMPOS - FUNIL DE VENDAS
+    # CAMPOS - FUNIL DE VENDAS
     # ============================================================
     status_funil = Column(String(20), default='meio')
     funil_stage = Column(String(20), default='lead_quente')
@@ -210,7 +239,7 @@ class Pedido(Base):
 
 
 # =========================================================
-# 🎯 NOVA TABELA: LEADS (TOPO DO FUNIL)
+# 🎯 TABELA: LEADS (TOPO DO FUNIL)
 # =========================================================
 class Lead(Base):
     """

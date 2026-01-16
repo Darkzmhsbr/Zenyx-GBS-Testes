@@ -21,7 +21,7 @@ from database import Lead  # Não esqueça de importar Lead!
 
 
 # Importa o banco e o script de reparo
-from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, engine
+from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, engine
 import update_db 
 
 from migration_v3 import executar_migracao_v3
@@ -600,6 +600,17 @@ class UserUpdateCRM(BaseModel):
     custom_expiration: Optional[str] = None 
     status: Optional[str] = None
 
+# --- MODELOS ORDER BUMP ---
+class OrderBumpCreate(BaseModel):
+    ativo: bool
+    nome_produto: str
+    preco: float
+    link_acesso: str
+    msg_texto: Optional[str] = None
+    msg_media: Optional[str] = None
+    btn_aceitar: Optional[str] = "✅ SIM, ADICIONAR"
+    btn_recusar: Optional[str] = "❌ NÃO, OBRIGADO"
+
 class IntegrationUpdate(BaseModel):
     token: str
 
@@ -993,6 +1004,42 @@ def criar_plano(plano: PlanoCreate, db: Session = Depends(get_db)):
 @app.get("/api/admin/plans/{bot_id}")
 def listar_planos(bot_id: int, db: Session = Depends(get_db)):
     return db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
+
+# =========================================================
+# 🛒 ORDER BUMP API
+# =========================================================
+@app.get("/api/admin/bots/{bot_id}/order-bump")
+def get_order_bump(bot_id: int, db: Session = Depends(get_db)):
+    bump = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_id).first()
+    if not bump:
+        # Retorna objeto vazio padrão se não existir
+        return {
+            "ativo": False, "nome_produto": "", "preco": 0.0, "link_acesso": "",
+            "msg_texto": "", "msg_media": "", 
+            "btn_aceitar": "✅ SIM, ADICIONAR", "btn_recusar": "❌ NÃO, OBRIGADO"
+        }
+    return bump
+
+@app.post("/api/admin/bots/{bot_id}/order-bump")
+def save_order_bump(bot_id: int, dados: OrderBumpCreate, db: Session = Depends(get_db)):
+    bump = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_id).first()
+    
+    if not bump:
+        bump = OrderBumpConfig(bot_id=bot_id)
+        db.add(bump)
+    
+    bump.ativo = dados.ativo
+    bump.nome_produto = dados.nome_produto
+    bump.preco = dados.preco
+    bump.link_acesso = dados.link_acesso
+    bump.msg_texto = dados.msg_texto
+    bump.msg_media = dados.msg_media
+    bump.btn_aceitar = dados.btn_aceitar
+    bump.btn_recusar = dados.btn_recusar
+    
+    db.commit()
+    db.refresh(bump)
+    return {"status": "ok", "msg": "Order Bump salvo com sucesso"}
 
 # =========================================================
 # 🗑️ ROTA DELETAR PLANO (COM DESVINCULAÇÃO SEGURA)
@@ -1669,14 +1716,14 @@ async def receber_update_telegram(bot_token: str, request: Request, db: Session 
             
             bot_temp.answer_callback_query(update.callback_query.id)
 
-        # ============================================================
+# ============================================================
 # 🔥 CORREÇÃO: Handler promo_ com LOGS DETALHADOS
 # LOCALIZAÇÃO: Linha 1474-1587
 # PROBLEMA: "Oferta não encontrada" mesmo com UUID correto
 # SOLUÇÃO: Adicionar logs + Verificações
 # ============================================================
 
-# SUBSTITUA TODO O BLOCO de linhas 1474-1587 por este:
+        # SUBSTITUA TODO O BLOCO de linhas 1474-1587 por este:
 
         elif update.callback_query and update.callback_query.data.startswith("promo_"):
             chat_id = update.callback_query.message.chat.id
@@ -1829,7 +1876,7 @@ Copie o código abaixo para garantir sua vaga:
             return {"status": "processed"}
 
         # ============================================================
-        # 🛒 CHECKOUT PADRÃO (CORRIGIDO COM ANTI-DUPLICAÇÃO)
+        # 🛒 CHECKOUT (COM INTERCEPTAÇÃO DE ORDER BUMP)
         # ============================================================
         elif update.callback_query and update.callback_query.data.startswith("checkout_"):
             chat_id = update.callback_query.message.chat.id
@@ -1842,11 +1889,188 @@ Copie o código abaixo para garantir sua vaga:
                 bot_temp.send_message(chat_id, "❌ Plano não encontrado.")
                 return {"status": "error"}
 
-            # --- MENSAGEM DE AGUARDE (ATUALIZADA) ---
-            msg_aguarde = bot_temp.send_message(
-                chat_id, 
-                "🛑♻️ Seu 𝗣𝗮𝗴𝗮𝗺𝗲𝗻o está sendo 𝗚𝗘𝗥𝗔𝗗o ... Com 𝗣𝗿𝗼𝘁𝗲ç𝗮̃o & 𝗦𝗲𝗴𝘂𝗿a𝗻ç𝗮 de Compra! 🔐👩🏻‍💻 Aguarde um instante."
-            )
+            # --- VERIFICA SE TEM ORDER BUMP ATIVO ---
+            bump_config = db.query(OrderBumpConfig).filter(
+                OrderBumpConfig.bot_id == bot_db.id,
+                OrderBumpConfig.ativo == True
+            ).first()
+
+            if bump_config:
+                # 🛑 TEM BUMP: Manda a oferta extra em vez do PIX
+                logger.info(f"🛒 [BOT {bot_db.id}] Order Bump detectado! Enviando oferta para {chat_id}")
+                
+                markup_bump = types.InlineKeyboardMarkup()
+                markup_bump.row(
+                    types.InlineKeyboardButton(f"{bump_config.btn_aceitar} (+ R$ {bump_config.preco:.2f})", callback_data=f"bump_yes_{plano.id}"),
+                    types.InlineKeyboardButton(bump_config.btn_recusar, callback_data=f"bump_no_{plano.id}")
+                )
+                
+                texto_bump = bump_config.msg_texto if bump_config.msg_texto else f"Gostaria de levar {bump_config.nome_produto} junto?"
+                
+                if bump_config.msg_media:
+                    try:
+                        if bump_config.msg_media.lower().endswith(('.mp4', '.mov')):
+                            bot_temp.send_video(chat_id, bump_config.msg_media, caption=texto_bump, reply_markup=markup_bump)
+                        else:
+                            bot_temp.send_photo(chat_id, bump_config.msg_media, caption=texto_bump, reply_markup=markup_bump)
+                    except:
+                        bot_temp.send_message(chat_id, texto_bump, reply_markup=markup_bump)
+                else:
+                    bot_temp.send_message(chat_id, texto_bump, reply_markup=markup_bump)
+                
+            else:
+                # 🚀 SEM BUMP: Segue fluxo normal
+                logger.info(f"🛒 [BOT {bot_db.id}] Sem Order Bump. Gerando PIX normal...")
+                
+                msg_aguarde = bot_temp.send_message(
+                    chat_id, 
+                    "🛑♻️ Seu 𝗣𝗮𝗴𝗮𝗺𝗲𝗻o está sendo 𝗚𝗘𝗥𝗔𝗗o ... Com 𝗣𝗿𝗼𝘁𝗲ç𝗮̃o & 𝗦𝗲𝗴𝘂𝗿a𝗻ç𝗮 de Compra! 🔐👩🏻‍💻 Aguarde um instante."
+                )
+                
+                temp_uuid = str(uuid.uuid4())
+                pix_data = gerar_pix_pushinpay(plano.preco_atual, temp_uuid)
+                
+                if pix_data:
+                    qr_code_text = pix_data.get("qr_code_text") or pix_data.get("qr_code")
+                    provider_id = pix_data.get("id") or temp_uuid
+                    final_tx_id = str(provider_id).lower()
+
+                    # Salva Pedido Normal
+                    pedido_existente = db.query(Pedido).filter(Pedido.telegram_id == str(chat_id), Pedido.bot_id == bot_db.id).first()
+
+                    if pedido_existente:
+                        pedido_existente.plano_nome = plano.nome_exibicao
+                        pedido_existente.plano_id = plano.id
+                        pedido_existente.valor = plano.preco_atual
+                        pedido_existente.status = "pending"
+                        pedido_existente.transaction_id = final_tx_id
+                        pedido_existente.qr_code = qr_code_text
+                        pedido_existente.tem_order_bump = False
+                        pedido_existente.created_at = datetime.utcnow()
+                        if plano.dias_duracao == 99999: pedido_existente.custom_expiration = None
+                        db.commit()
+                    else:
+                        novo_pedido = Pedido(
+                            bot_id=bot_db.id, transaction_id=final_tx_id, telegram_id=str(chat_id),
+                            first_name=first_name, username=username, plano_nome=plano.nome_exibicao,
+                            plano_id=plano.id, valor=plano.preco_atual, status="pending", qr_code=qr_code_text,
+                            tem_order_bump=False, created_at=datetime.utcnow()
+                        )
+                        db.add(novo_pedido)
+                        db.commit()
+
+                    try: bot_temp.delete_message(chat_id, msg_aguarde.message_id)
+                    except: pass
+
+                    # MENSAGEM PADRÃO
+                    legenda_pix = f"""🌟 Seu pagamento foi gerado com sucesso:
+🎁 Plano: {plano.nome_exibicao}
+💰 Valor: R$ {plano.preco_atual:.2f}
+🔐 Pague via Pix Copia e Cola:
+
+```
+{qr_code_text}
+```
+
+👆 Toque na chave PIX acima para copiá-la
+‼️ Após o pagamento, o acesso será liberado automaticamente!"""
+                    
+                    bot_temp.send_message(chat_id, legenda_pix, parse_mode="Markdown")
+                else:
+                    bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
+
+            bot_temp.answer_callback_query(update.callback_query.id)
+
+        # ============================================================
+        # 🛒 RESPOSTA ORDER BUMP: SIM (ACEITOU)
+        # ============================================================
+        elif update.callback_query and update.callback_query.data.startswith("bump_yes_"):
+            chat_id = update.callback_query.message.chat.id
+            first_name = update.callback_query.from_user.first_name
+            username = update.callback_query.from_user.username
+            plano_id = update.callback_query.data.split("_")[2]
+            
+            plano = db.query(PlanoConfig).filter(PlanoConfig.id == plano_id).first()
+            bump = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_db.id).first()
+            
+            if not plano or not bump:
+                bot_temp.send_message(chat_id, "❌ Erro: Oferta não encontrada.")
+                return {"status": "error"}
+            
+            # --- CÁLCULOS E NOMES DO COMBO ---
+            preco_total = plano.preco_atual + bump.preco
+            nome_combo = f"{plano.nome_exibicao} + {bump.nome_produto}"
+            
+            logger.info(f"💰 [BOT {bot_db.id}] Cliente ACEITOU Bump. Total: R$ {preco_total:.2f}")
+            
+            msg_aguarde = bot_temp.send_message(chat_id, f"🛑♻️ Gerando combo: {nome_combo} ... 🔐 Aguarde!")
+            
+            temp_uuid = str(uuid.uuid4())
+            pix_data = gerar_pix_pushinpay(preco_total, temp_uuid)
+            
+            if pix_data:
+                qr_code_text = pix_data.get("qr_code_text") or pix_data.get("qr_code")
+                provider_id = pix_data.get("id") or temp_uuid
+                final_tx_id = str(provider_id).lower()
+                
+                # Salva pedido COM FLAG DE BUMP
+                pedido_existente = db.query(Pedido).filter(Pedido.telegram_id == str(chat_id), Pedido.bot_id == bot_db.id).first()
+                
+                if pedido_existente:
+                    pedido_existente.plano_nome = nome_combo
+                    pedido_existente.plano_id = plano.id
+                    pedido_existente.valor = preco_total
+                    pedido_existente.status = "pending"
+                    pedido_existente.transaction_id = final_tx_id
+                    pedido_existente.qr_code = qr_code_text
+                    pedido_existente.tem_order_bump = True
+                    pedido_existente.created_at = datetime.utcnow()
+                    db.commit()
+                else:
+                    novo_pedido = Pedido(
+                        bot_id=bot_db.id, transaction_id=final_tx_id, telegram_id=str(chat_id),
+                        first_name=first_name, username=username, plano_nome=nome_combo,
+                        plano_id=plano.id, valor=preco_total, status="pending", qr_code=qr_code_text,
+                        tem_order_bump=True, created_at=datetime.utcnow()
+                    )
+                    db.add(novo_pedido)
+                    db.commit()
+                
+                try: bot_temp.delete_message(chat_id, msg_aguarde.message_id)
+                except: pass
+                
+                # --- MENSAGEM COMBO (PERSONALIZADA) ---
+                legenda_pix = f"""🌟 Seu pagamento foi gerado com sucesso:
+🎁 Plano: {nome_combo}
+💰 Valor: R$ {preco_total:.2f}
+🔐 Pague via Pix Copia e Cola:
+
+```
+{qr_code_text}
+```
+
+👆 Toque na chave PIX acima para copiá-la
+‼️ Após o pagamento, o acesso será liberado automaticamente!"""
+
+                bot_temp.send_message(chat_id, legenda_pix, parse_mode="Markdown")
+            
+            bot_temp.answer_callback_query(update.callback_query.id)
+
+        # ============================================================
+        # 🛒 RESPOSTA ORDER BUMP: NÃO (RECUSOU)
+        # ============================================================
+        elif update.callback_query and update.callback_query.data.startswith("bump_no_"):
+            chat_id = update.callback_query.message.chat.id
+            first_name = update.callback_query.from_user.first_name
+            username = update.callback_query.from_user.username
+            plano_id = update.callback_query.data.split("_")[2]
+            
+            plano = db.query(PlanoConfig).filter(PlanoConfig.id == plano_id).first()
+            if not plano: return {"status": "error"}
+            
+            logger.info(f"📉 [BOT {bot_db.id}] Cliente RECUSOU Bump. Gerando apenas Plano: R$ {plano.preco_atual:.2f}")
+            
+            msg_aguarde = bot_temp.send_message(chat_id, "🛑♻️ Gerando apenas o plano principal... 🔐 Aguarde!")
             
             temp_uuid = str(uuid.uuid4())
             pix_data = gerar_pix_pushinpay(plano.preco_atual, temp_uuid)
@@ -1855,79 +2079,34 @@ Copie o código abaixo para garantir sua vaga:
                 qr_code_text = pix_data.get("qr_code_text") or pix_data.get("qr_code")
                 provider_id = pix_data.get("id") or temp_uuid
                 final_tx_id = str(provider_id).lower()
-
-                # ============================================================
-                # [CORREÇÃO] ANTI-DUPLICAÇÃO - VERIFICA SE USUÁRIO JÁ EXISTE
-                # ============================================================
-                pedido_existente = db.query(Pedido).filter(
-                    Pedido.telegram_id == str(chat_id),
-                    Pedido.bot_id == bot_db.id
-                ).first()
-
+                
+                # Salva pedido SEM BUMP
+                pedido_existente = db.query(Pedido).filter(Pedido.telegram_id == str(chat_id), Pedido.bot_id == bot_db.id).first()
+                
                 if pedido_existente:
-                    # [CORREÇÃO] ATUALIZA o pedido existente
-                    logger.info(f"📝 [BOT {bot_db.id}] Usuário {chat_id} já existe. Atualizando pedido...")
-                    
                     pedido_existente.plano_nome = plano.nome_exibicao
                     pedido_existente.plano_id = plano.id
                     pedido_existente.valor = plano.preco_atual
                     pedido_existente.status = "pending"
                     pedido_existente.transaction_id = final_tx_id
                     pedido_existente.qr_code = qr_code_text
-                    pedido_existente.data_aprovacao = None
+                    pedido_existente.tem_order_bump = False
                     pedido_existente.created_at = datetime.utcnow()
-                    
-                    # Se tinha custom_expiration e agora é vitalício, remove
-                    if plano.dias_duracao == 99999:
-                        pedido_existente.custom_expiration = None
-                    
                     db.commit()
-                    db.refresh(pedido_existente)
-                    
-                    logger.info(f"✅ [BOT {bot_db.id}] Pedido atualizado para {chat_id}")
-                    
-                    # [NOVO] Notifica admin sobre lead atualizado
-                    try:
-                        msg_lead = f"🔄 *Lead Atualizado (PIX Gerado)*\n👤 {first_name}\n💰 R$ {plano.preco_atual:.2f}"
-                        notificar_admin_principal(bot_db, msg_lead)
-                    except Exception as e:
-                        logger.error(f"Erro ao notificar lead: {e}")
                 else:
-                    # [MANTÉM] Se não existe, cria um novo
-                    logger.info(f"🆕 [BOT {bot_db.id}] Criando primeiro pedido para {chat_id}...")
-                    
                     novo_pedido = Pedido(
-                        bot_id=bot_db.id,
-                        transaction_id=final_tx_id, 
-                        telegram_id=str(chat_id),
-                        first_name=first_name,
-                        username=username,
-                        plano_nome=plano.nome_exibicao,
-                        plano_id=plano.id,
-                        valor=plano.preco_atual,
-                        status="pending",
-                        qr_code=qr_code_text,
-                        created_at=datetime.utcnow()
+                        bot_id=bot_db.id, transaction_id=final_tx_id, telegram_id=str(chat_id),
+                        first_name=first_name, username=username, plano_nome=plano.nome_exibicao,
+                        plano_id=plano.id, valor=plano.preco_atual, status="pending", qr_code=qr_code_text,
+                        tem_order_bump=False, created_at=datetime.utcnow()
                     )
                     db.add(novo_pedido)
                     db.commit()
-                    db.refresh(novo_pedido)
-                    
-                    logger.info(f"✅ [BOT {bot_db.id}] Pedido criado para {chat_id}")
-
-                    # [MANTÉM] Notifica admin sobre novo lead
-                    try:
-                        msg_lead = f"🆕 *Novo Lead (PIX Gerado)*\n👤 {first_name}\n💰 R$ {plano.preco_atual:.2f}"
-                        notificar_admin_principal(bot_db, msg_lead)
-                    except Exception as e:
-                        logger.error(f"Erro ao notificar lead: {e}")
-
-                try: 
-                    bot_temp.delete_message(chat_id, msg_aguarde.message_id)
-                except: 
-                    pass
-
-                # Manda o PIX Bonitinho (CHECKOUT PADRÃO)
+                
+                try: bot_temp.delete_message(chat_id, msg_aguarde.message_id)
+                except: pass
+                
+                # --- MENSAGEM PADRÃO (SÓ O PLANO) ---
                 legenda_pix = f"""🌟 Seu pagamento foi gerado com sucesso:
 🎁 Plano: {plano.nome_exibicao}
 💰 Valor: R$ {plano.preco_atual:.2f}
@@ -1941,16 +2120,19 @@ Copie o código abaixo para garantir sua vaga:
 ‼️ Após o pagamento, o acesso será liberado automaticamente!"""
 
                 bot_temp.send_message(chat_id, legenda_pix, parse_mode="Markdown")
-            else:
-                bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX. Tente novamente ou contate o suporte.")
-
+            
             bot_temp.answer_callback_query(update.callback_query.id)
 
-        return {"status": "processed"}
+            # --- FIM DOS ELIFS DO WEBHOOK ---
         
+        # Retorno de sucesso para o Telegram não ficar repetindo a mensagem
+        return {"status": "processed"}
+
     except Exception as e:
-        logger.error(f"Erro webhook: {e}")
+        # FECHAMENTO DO TRY PRINCIPAL DA FUNÇÃO WEBHOOK
+        logger.error(f"Erro no processamento do webhook: {e}")
         return {"status": "error"}
+
 # ============================================================
 # ROTA 1: LISTAR LEADS (TOPO DO FUNIL)
 # ============================================================
