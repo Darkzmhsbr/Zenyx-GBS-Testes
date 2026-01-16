@@ -935,47 +935,38 @@ def listar_bots(db: Session = Depends(get_db)):
     🔥 [CORRIGIDO] Lista todos os bots com estatísticas corretas
     
     CORREÇÕES:
-    - Leads: Conta LEADS (tabela Lead) + PEDIDOS (tabela Pedido) SEM DUPLICATAS
-    - Revenue: Soma apenas pedidos com status 'approved', 'paid', 'active'
-    - Username: Garante que sempre retorna o username
+    - Leads: Conta LEADS + PEDIDOS SEM DUPLICATAS
+    - Revenue: Soma pedidos PAGOS + EXPIRADOS (Dinheiro que entrou)
     """
-    from sqlalchemy import func
-    
     bots = db.query(Bot).all()
     
     result = []
     for bot in bots:
-        # ============================================================
-        # 🔥 [CORRIGIDO] Conta LEADS + PEDIDOS (sem duplicatas)
-        # Usa a mesma lógica da página Contatos (filtro TODOS)
-        # ============================================================
-        
-        # 1. Buscar todos os telegram_ids de LEADS
+        # 1. CONTAGEM DE LEADS ÚNICOS (MANTIDO)
         leads_ids = set()
         leads_query = db.query(Lead.user_id).filter(Lead.bot_id == bot.id).all()
         for lead in leads_query:
             leads_ids.add(str(lead.user_id))
         
-        # 2. Buscar todos os telegram_ids de PEDIDOS
         pedidos_ids = set()
         pedidos_query = db.query(Pedido.telegram_id).filter(Pedido.bot_id == bot.id).all()
         for pedido in pedidos_query:
             pedidos_ids.add(str(pedido.telegram_id))
         
-        # 3. União dos sets (elimina duplicatas automaticamente)
-        # Se um lead virou pedido, conta apenas 1 vez
         contatos_unicos = leads_ids.union(pedidos_ids)
         leads_count = len(contatos_unicos)
         
-        logger.info(f"📊 Bot {bot.nome}: {len(leads_ids)} leads + {len(pedidos_ids)} pedidos = {leads_count} contatos únicos")
+        # ============================================================
+        # 💰 [CORRIGIDO] Revenue: Inclui 'expired' na conta!
+        # ============================================================
+        # Lista de status que consideram dinheiro no bolso
+        status_financeiro = ["approved", "paid", "active", "completed", "succeeded", "expired"]
         
-        # ============================================================
-        # 💰 [MANTIDO] Revenue: Soma vendas aprovadas
-        # ============================================================
         vendas_aprovadas = db.query(Pedido).filter(
             Pedido.bot_id == bot.id,
-            Pedido.status.in_(["approved", "paid", "active"])
+            Pedido.status.in_(status_financeiro) # 🔥 AGORA CONTA EXPIRADOS
         ).all()
+        
         revenue = sum([v.valor for v in vendas_aprovadas]) if vendas_aprovadas else 0.0
         
         result.append({
@@ -986,7 +977,7 @@ def listar_bots(db: Session = Depends(get_db)):
             "id_canal_vip": bot.id_canal_vip,
             "admin_principal_id": bot.admin_principal_id,
             "status": bot.status,
-            "leads": leads_count,        # 🔥 [CORRIGIDO] Leads + Pedidos únicos
+            "leads": leads_count,
             "revenue": revenue,
             "created_at": bot.created_at
         })
@@ -2961,28 +2952,22 @@ def dashboard_stats(
     db: Session = Depends(get_db)
 ): 
     """
-    Dashboard V2: Suporta filtro por período personalizado.
-    Padrão: Mês atual.
+    Dashboard V2: Suporta filtro por período.
+    🔥 CORREÇÃO: Inclui 'expired' no cálculo financeiro.
     """
     try:
         # 1. DEFINIÇÃO DO PERÍODO
         agora = datetime.utcnow()
         
         if start_date and end_date:
-            # Se o usuário mandou datas (Filtro Personalizado)
-            # O frontend manda em formato ISO (ex: 2023-10-25T14:00:00.000Z)
-            # Vamos pegar só a data YYYY-MM-DD
             dt_inicio = datetime.fromisoformat(start_date.replace('Z', '+00:00')).replace(hour=0, minute=0, second=0, tzinfo=None)
             dt_fim = datetime.fromisoformat(end_date.replace('Z', '+00:00')).replace(hour=23, minute=59, second=59, tzinfo=None)
         else:
-            # Padrão: Mês Atual (Do dia 1 até agora)
             dt_inicio = datetime(agora.year, agora.month, 1)
             dt_fim = agora
 
-        # Data de hoje (para comparação de "Vendas Hoje")
         hoje_inicio = datetime(agora.year, agora.month, agora.day)
 
-        # 2. QUERIES BASE
         query_leads = db.query(Lead)
         query_pedidos = db.query(Pedido)
 
@@ -2990,19 +2975,18 @@ def dashboard_stats(
             query_leads = query_leads.filter(Lead.bot_id == bot_id)
             query_pedidos = query_pedidos.filter(Pedido.bot_id == bot_id)
 
-        # --- KPIS FILTRADOS PELO PERÍODO SELECIONADO ---
-        
         # Leads no período
         leads_periodo = query_leads.filter(
             Lead.created_at >= dt_inicio,
             Lead.created_at <= dt_fim
         ).count()
 
-        # Novos Leads Hoje (Sempre fixo "Hoje" independentemente do filtro, para referência)
         leads_hoje = query_leads.filter(Lead.created_at >= hoje_inicio).count()
         
-        # Status de pagamento confirmado
-        status_pagos = ['paid', 'active', 'approved', 'completed', 'succeeded']
+        # ============================================================
+        # 💰 [CORRIGIDO] LISTA DE STATUS PAGOS (INCLUI EXPIRADO)
+        # ============================================================
+        status_pagos = ['paid', 'active', 'approved', 'completed', 'succeeded', 'expired']
         
         # Vendas no período selecionado
         vendas_periodo = query_pedidos.filter(
@@ -3011,56 +2995,51 @@ def dashboard_stats(
             Pedido.created_at <= dt_fim
         )
         
-        # Total Faturamento (No período)
+        # Total Faturamento
         total_revenue = db.query(func.sum(Pedido.valor)).filter(
-            Pedido.status.in_(status_pagos),
+            Pedido.status.in_(status_pagos), # 🔥 AGORA CONTA EXPIRADOS
             Pedido.created_at >= dt_inicio,
             Pedido.created_at <= dt_fim
         )
         if bot_id: total_revenue = total_revenue.filter(Pedido.bot_id == bot_id)
         valor_total_revenue = total_revenue.scalar() or 0.0
 
-        # Assinantes (Quantidade de vendas no período)
+        # Assinantes (Transações no período)
         total_transactions = vendas_periodo.count()
         
-        # Assinantes Ativos Totais (Base geral, independente do filtro de data)
-        # É legal mostrar a base total mesmo filtrando datas passadas
-        total_active_users = db.query(Pedido).filter(Pedido.status.in_(status_pagos))
+        # Assinantes Ativos Totais (Base geral - AQUI NÃO CONTA EXPIRADO, POIS É "ATIVO")
+        # Para "Ativos", mantemos a lógica antiga (sem expired)
+        status_ativos_reais = ['paid', 'active', 'approved', 'completed', 'succeeded']
+        total_active_users = db.query(Pedido).filter(Pedido.status.in_(status_ativos_reais))
         if bot_id: total_active_users = total_active_users.filter(Pedido.bot_id == bot_id)
         count_active_users = total_active_users.count()
 
-        # Ticket Médio (No período)
+        # Ticket Médio
         ticket_medio = (valor_total_revenue / total_transactions) if total_transactions > 0 else 0.0
 
-        # Vendas Hoje (Sempre fixo "Hoje")
+        # Vendas Hoje
         sales_today_query = db.query(func.sum(Pedido.valor)).filter(
-            Pedido.status.in_(status_pagos),
+            Pedido.status.in_(status_pagos), # 🔥 AGORA CONTA EXPIRADOS (Se expirou hoje, conta)
             Pedido.created_at >= hoje_inicio
         )
         if bot_id: sales_today_query = sales_today_query.filter(Pedido.bot_id == bot_id)
         valor_sales_today = sales_today_query.scalar() or 0.0
 
-        # Taxa de Conversão (No período)
+        # Taxa de Conversão
         universo_total = leads_periodo + total_transactions
         conversao = (total_transactions / universo_total * 100) if universo_total > 0 else 0.0
 
-        # --- DADOS DO GRÁFICO (DIÁRIO DENTRO DO PERÍODO) ---
+        # --- DADOS DO GRÁFICO ---
         chart_data = []
-        
-        # Calcula quantos dias tem no intervalo
         delta = (dt_fim - dt_inicio).days
-        
-        # Se o intervalo for muito grande (> 60 dias), agrupar por mês ou limitar (Opcional)
-        # Por enquanto, vamos manter diário, mas limitando o loop para não explodir
-        dias_para_grafico = min(delta + 1, 366) # Limite de 1 ano para visualização diária
+        dias_para_grafico = min(delta + 1, 366)
         
         for i in range(dias_para_grafico):
             data_loop = dt_inicio + timedelta(days=i)
-            data_loop_fim = data_loop + timedelta(days=1) # Fim do dia atual do loop
+            data_loop_fim = data_loop + timedelta(days=1)
             
-            # Soma vendas daquele dia
             soma_dia = db.query(func.sum(Pedido.valor)).filter(
-                Pedido.status.in_(status_pagos),
+                Pedido.status.in_(status_pagos), # 🔥 AGORA CONTA EXPIRADOS
                 Pedido.created_at >= data_loop,
                 Pedido.created_at < data_loop_fim
             )
@@ -3075,9 +3054,9 @@ def dashboard_stats(
 
         return {
             "total_revenue": valor_total_revenue,
-            "active_users": count_active_users, # Base Total
+            "active_users": count_active_users,
             "sales_today": valor_sales_today,
-            "leads_mes": leads_periodo,         # Agora representa Leads do FILTRO
+            "leads_mes": leads_periodo,
             "leads_hoje": leads_hoje,
             "ticket_medio": ticket_medio,
             "total_transacoes": total_transactions,
@@ -3335,27 +3314,23 @@ def enviar_oferta_final(tb, cid, fluxo, bot_id, db):
 @app.get("/api/admin/profile")
 def get_profile_stats(db: Session = Depends(get_db)):
     """
-    Retorna dados do perfil do administrador + Estatísticas GLOBAIS de todos os bots.
-    Calcula o progresso para a próxima placa de faturamento.
+    Retorna dados do perfil + Estatísticas GLOBAIS.
+    🔥 CORREÇÃO: Faturamento inclui usuários expirados.
     """
     try:
-        # 1. Busca Configurações de Perfil (SystemConfig)
+        # 1. Busca Configurações
         conf_name = db.query(SystemConfig).filter(SystemConfig.key == "admin_name").first()
         conf_avatar = db.query(SystemConfig).filter(SystemConfig.key == "admin_avatar").first()
         
         admin_name = conf_name.value if conf_name else "Administrador"
         admin_avatar = conf_avatar.value if conf_avatar else ""
 
-        # 2. Estatísticas GLOBAIS (Soma de tudo)
-        
-        # A) Total de Bots Ativos
+        # 2. Estatísticas GLOBAIS
         total_bots = db.query(Bot).count()
         
-        # B) Total de Membros (Leads Únicos + Pedidos Únicos de TODOS os bots)
         q_leads = db.query(Lead.user_id).all()
         q_pedidos = db.query(Pedido.telegram_id).all()
         
-        # Usa SET para contar usuários únicos globais
         unique_members = set()
         for r in q_leads:
             if r[0]: unique_members.add(str(r[0]))
@@ -3364,16 +3339,17 @@ def get_profile_stats(db: Session = Depends(get_db)):
             
         total_members = len(unique_members)
         
-        # C) Faturamento Total (Apenas Pagos/Aprovados)
-        status_ok = ['paid', 'approved', 'active', 'completed', 'succeeded']
-        revenue_query = db.query(func.sum(Pedido.valor)).filter(Pedido.status.in_(status_ok))
+        # ============================================================
+        # 💰 [CORRIGIDO] Status para Contar DINHEIRO (INCLUI EXPIRADO)
+        # ============================================================
+        status_financeiro = ['paid', 'approved', 'active', 'completed', 'succeeded', 'expired']
+        
+        revenue_query = db.query(func.sum(Pedido.valor)).filter(Pedido.status.in_(status_financeiro))
         total_revenue = revenue_query.scalar() or 0.0
         
-        # D) Total de Vendas (Quantidade)
-        total_sales = db.query(Pedido).filter(Pedido.status.in_(status_ok)).count()
+        total_sales = db.query(Pedido).filter(Pedido.status.in_(status_financeiro)).count()
         
-        # 3. Lógica de Gamificação (Placas)
-        # Níveis: 100k (Prodígio), 500k (Empreendedor), 1M (Milionário), 10M (Magnata)
+        # 3. Lógica de Gamificação
         levels = [
             {"name": "Prodígio", "target": 100000, "slug": "prodigio"},
             {"name": "Empreendedor", "target": 500000, "slug": "empreendedor"},
@@ -3391,17 +3367,14 @@ def get_profile_stats(db: Session = Depends(get_db)):
                 next_level = lvl
                 break
         
-        # Se passou do último nível
         if total_revenue >= levels[-1]["target"]:
             next_level = None 
             
-        # Cálculo da porcentagem para a barra de progresso
         if next_level:
-            # Ex: Faturou 20k, Meta 100k -> 20%
             progress_pct = (total_revenue / next_level["target"]) * 100
             progress_pct = min(progress_pct, 100)
         else:
-            progress_pct = 100 # Zerou o jogo
+            progress_pct = 100
             
         return {
             "profile": {
