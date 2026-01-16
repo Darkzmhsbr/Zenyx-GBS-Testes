@@ -1461,7 +1461,7 @@ def enviar_passo_automatico(bot_temp, chat_id, passo_atual, bot_db, db):
 # 🚀 WEBHOOK GERAL (PORTEIRO + ORDER BUMP + FLUXO + HTML + PROMO FULL)
 # =========================================================
 # =========================================================
-# 🚀 WEBHOOK GERAL (TEXTOS CORRIGIDOS + PORTEIRO + HTML)
+# 🚀 WEBHOOK GERAL (PORTEIRO + BUMP + HTML + BTN CHECK STATUS)
 # =========================================================
 @app.post("/webhook/{token}")
 async def receber_update_telegram(token: str, req: Request, db: Session = Depends(get_db)):
@@ -1583,7 +1583,11 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
         # 🎮 3. CALLBACKS (BOTÕES)
         # ============================================================
         elif update.callback_query:
-            try: bot_temp.answer_callback_query(update.callback_query.id)
+            # Resposta rápida para não ficar carregando
+            try: 
+                # Apenas responde se NÃO for o botão de checagem (ele tem alert específico)
+                if not update.callback_query.data.startswith("check_payment_"):
+                    bot_temp.answer_callback_query(update.callback_query.id)
             except: pass
             
             chat_id = update.callback_query.message.chat.id
@@ -1637,7 +1641,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 else:
                     enviar_oferta_final(bot_temp, chat_id, bot_db.fluxo, bot_db.id, db)
 
-            # --- B) CHECKOUT (MENSAGEM CORRIGIDA) ---
+            # --- B) CHECKOUT (COM BOTÃO VERIFICAR) ---
             elif data.startswith("checkout_"):
                 plano_id = data.split("_")[1]
                 plano = db.query(PlanoConfig).filter(PlanoConfig.id == plano_id).first()
@@ -1684,7 +1688,10 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         try: bot_temp.delete_message(chat_id, msg_wait.message_id)
                         except: pass
                         
-                        # 🔥 MENSAGEM PADRÃO CORRIGIDA
+                        # 🔥 BOTÃO DE VERIFICAÇÃO ADICIONADO
+                        markup_pix = types.InlineKeyboardMarkup()
+                        markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS DO PAGAMENTO", callback_data=f"check_payment_{txid}"))
+
                         msg_pix = f"""🌟 Seu pagamento foi gerado com sucesso:
 🎁 Plano: <b>{plano.nome_exibicao}</b>
 💰 Valor: <b>R$ {plano.preco_atual:.2f}</b>
@@ -1695,11 +1702,11 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
 👆 Toque na chave PIX acima para copiá-la
 ‼️ Após o pagamento, o acesso será liberado automaticamente!"""
                         
-                        bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML")
+                        bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
                     else:
                         bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
 
-            # --- C) BUMP YES/NO (MENSAGEM CORRIGIDA) ---
+            # --- C) BUMP YES/NO (COM BOTÃO VERIFICAR) ---
             elif data.startswith("bump_yes_") or data.startswith("bump_no_"):
                 aceitou = "yes" in data
                 pid = data.split("_")[2]
@@ -1735,7 +1742,10 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     try: bot_temp.delete_message(chat_id, msg_wait.message_id)
                     except: pass
                     
-                    # 🔥 MENSAGEM COMBO CORRIGIDA
+                    # 🔥 BOTÃO DE VERIFICAÇÃO ADICIONADO
+                    markup_pix = types.InlineKeyboardMarkup()
+                    markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS DO PAGAMENTO", callback_data=f"check_payment_{txid}"))
+
                     msg_pix = f"""🌟 Seu pagamento foi gerado com sucesso:
 🎁 Plano: <b>{nome_final}</b>
 💰 Valor: <b>R$ {valor_final:.2f}</b>
@@ -1746,9 +1756,9 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
 👆 Toque na chave PIX acima para copiá-la
 ‼️ Após o pagamento, o acesso será liberado automaticamente!"""
 
-                    bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML")
+                    bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
 
-            # --- D) PROMOÇÕES (MENSAGEM CORRIGIDA) ---
+            # --- D) PROMOÇÕES DE REMARKETING (COM BOTÃO VERIFICAR) ---
             elif data.startswith("promo_"):
                 try: campanha_uuid = data.split("_")[1]
                 except: campanha_uuid = ""
@@ -1787,7 +1797,10 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             try: bot_temp.delete_message(chat_id, msg_wait.message_id)
                             except: pass
                             
-                            # 🔥 MENSAGEM PROMO CORRIGIDA
+                            # 🔥 BOTÃO DE VERIFICAÇÃO ADICIONADO
+                            markup_pix = types.InlineKeyboardMarkup()
+                            markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS DO PAGAMENTO", callback_data=f"check_payment_{txid}"))
+
                             msg_pix = f"""🌟 Seu pagamento foi gerado com sucesso:
 🎁 Plano: <b>{plano.nome_exibicao}</b>
 💰 Valor Promocional: <b>R$ {preco_final:.2f}</b>
@@ -1798,11 +1811,32 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
 👆 Toque na chave PIX acima para copiá-la
 ‼️ Após o pagamento, o acesso será liberado automaticamente!"""
 
-                            bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML")
+                            bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
                         else:
                             bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX da oferta.")
                     else:
                         bot_temp.send_message(chat_id, "❌ Plano da oferta não encontrado.")
+
+            # --- E) VERIFICAR STATUS DO PAGAMENTO (NOVA FUNCIONALIDADE) ---
+            elif data.startswith("check_payment_"):
+                tx_id = data.split("_")[2]
+                
+                # Busca o pedido no banco
+                pedido = db.query(Pedido).filter(Pedido.transaction_id == tx_id).first()
+                
+                if not pedido:
+                    bot_temp.answer_callback_query(update.callback_query.id, "❌ Pedido não encontrado.", show_alert=True)
+                
+                elif pedido.status in ['paid', 'approved', 'active']:
+                    # Se já está pago
+                    bot_temp.answer_callback_query(update.callback_query.id, "✅ Pagamento Aprovado!", show_alert=False)
+                    
+                    # Se por algum motivo o link não foi enviado, avisa para olhar o chat
+                    bot_temp.send_message(chat_id, "✅ <b>O pagamento foi confirmado!</b>\nVerifique se você recebeu o link de acesso nas mensagens anteriores.", parse_mode="HTML")
+                
+                else:
+                    # Ainda pendente
+                    bot_temp.answer_callback_query(update.callback_query.id, "⏳ O pagamento ainda não foi identificado. Aguarde alguns instantes e tente novamente.", show_alert=True)
 
     except Exception as e:
         logger.error(f"Erro no webhook: {e}")
