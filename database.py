@@ -88,6 +88,9 @@ class OrderBumpConfig(Base):
     nome_produto = Column(String) # Nome do produto extra
     preco = Column(Float)         # Valor a ser somado
     link_acesso = Column(String, nullable=True) # Link do canal/grupo extra
+
+    # 🔥 O CAMPO NOVO FICA AQUI
+    autodestruir = Column(Boolean, default=False)
     
     # Conteúdo da Oferta
     msg_texto = Column(Text, default="Gostaria de adicionar este item?")
