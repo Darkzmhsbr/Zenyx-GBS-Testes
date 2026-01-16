@@ -21,7 +21,7 @@ from database import Lead  # Não esqueça de importar Lead!
 
 
 # Importa o banco e o script de reparo
-from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, engine
+from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, MiniAppConfig, MiniAppCategory, engine
 import update_db 
 
 from migration_v3 import executar_migracao_v3
@@ -663,6 +663,48 @@ class TrackingLinkCreate(BaseModel):
     nome: str
     origem: Optional[str] = "outros" 
     codigo: Optional[str] = None
+
+# --- MODELOS MINI APP (TEMPLATE) ---
+class MiniAppConfigUpdate(BaseModel):
+    # Visual
+    logo_url: Optional[str] = None
+    background_type: Optional[str] = None # 'solid', 'gradient', 'image'
+    background_value: Optional[str] = None
+    
+    # Hero Section
+    hero_video_url: Optional[str] = None
+    hero_title: Optional[str] = None
+    hero_subtitle: Optional[str] = None
+    hero_btn_text: Optional[str] = None
+    
+    # Popup
+    enable_popup: Optional[bool] = None
+    popup_video_url: Optional[str] = None
+    popup_text: Optional[str] = None
+    
+    # Footer
+    footer_text: Optional[str] = None
+
+class MiniAppCategoryCreate(BaseModel):
+    bot_id: int
+    title: str
+    slug: Optional[str] = None # Se vazio, gera auto
+    description: Optional[str] = None
+    cover_image: Optional[str] = None
+    theme_color: Optional[str] = "#c333ff"
+    
+    # Flags Especiais
+    is_direct_checkout: bool = False
+    is_hacker_mode: bool = False
+
+    # Detalhes Visuais
+    banner_desk_url: Optional[str] = None
+    banner_mob_url: Optional[str] = None
+    footer_banner_url: Optional[str] = None
+    deco_line_url: Optional[str] = None
+    
+    # Conteúdo (JSON String)
+    content_json: Optional[str] = "[]" # Lista de vídeos/cards
 
 # --- MODELO DE PERFIL ---
 class ProfileUpdate(BaseModel):
@@ -1329,6 +1371,418 @@ def remover_passo_flow(bot_id: int, sid: int, db: Session = Depends(get_db)):
         db.delete(passo)
         db.commit()
     return {"status": "deleted"}
+
+@app.post("/api/admin/tracking/folders")
+def create_tracking_folder(dados: TrackingFolderCreate, db: Session = Depends(get_db)):
+    try:
+        nova_pasta = TrackingFolder(nome=dados.nome, plataforma=dados.plataforma)
+        db.add(nova_pasta)
+        db.commit()
+        db.refresh(nova_pasta)
+        return {"status": "ok", "id": nova_pasta.id}
+    except Exception as e:
+        logger.error(f"Erro ao criar pasta: {e}")
+        raise HTTPException(status_code=500, detail="Erro interno ao criar pasta")
+
+@app.get("/api/admin/tracking/links/{folder_id}")
+def list_tracking_links(folder_id: int, db: Session = Depends(get_db)):
+    return db.query(TrackingLink).filter(TrackingLink.folder_id == folder_id).all()
+
+@app.post("/api/admin/tracking/links")
+def create_tracking_link(dados: TrackingLinkCreate, db: Session = Depends(get_db)):
+    # Gera código aleatório se não informado
+    if not dados.codigo:
+        import random, string
+        chars = string.ascii_lowercase + string.digits
+        dados.codigo = ''.join(random.choice(chars) for _ in range(8))
+    
+    # Verifica duplicidade
+    exists = db.query(TrackingLink).filter(TrackingLink.codigo == dados.codigo).first()
+    if exists:
+        raise HTTPException(400, "Este código de rastreamento já existe.")
+        
+    novo_link = TrackingLink(
+        folder_id=dados.folder_id,
+        bot_id=dados.bot_id,
+        nome=dados.nome,
+        codigo=dados.codigo,
+        origem=dados.origem
+    )
+    db.add(novo_link)
+    db.commit()
+    return {"status": "ok", "link": novo_link}
+
+@app.delete("/api/admin/tracking/folders/{fid}")
+def delete_folder(fid: int, db: Session = Depends(get_db)):
+    # Apaga links dentro da pasta primeiro
+    db.query(TrackingLink).filter(TrackingLink.folder_id == fid).delete()
+    db.query(TrackingFolder).filter(TrackingFolder.id == fid).delete()
+    db.commit()
+    return {"status": "deleted"}
+
+@app.delete("/api/admin/tracking/links/{lid}")
+def delete_link(lid: int, db: Session = Depends(get_db)):
+    db.query(TrackingLink).filter(TrackingLink.id == lid).delete()
+    db.commit()
+    return {"status": "deleted"}
+
+# =========================================================
+# 🧩 ROTAS DE PASSOS DINÂMICOS (FLOW V2)
+# =========================================================
+@app.get("/api/admin/bots/{bot_id}/flow/steps")
+def listar_passos_flow(bot_id: int, db: Session = Depends(get_db)):
+    return db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_id).order_by(BotFlowStep.step_order).all()
+
+@app.post("/api/admin/bots/{bot_id}/flow/steps")
+def adicionar_passo_flow(bot_id: int, payload: FlowStepCreate, db: Session = Depends(get_db)):
+    bot = db.query(Bot).filter(Bot.id == bot_id).first()
+    if not bot: raise HTTPException(404, "Bot não encontrado")
+    
+    # Cria o novo passo
+    novo_passo = BotFlowStep(
+        bot_id=bot_id, step_order=payload.step_order,
+        msg_texto=payload.msg_texto, msg_media=payload.msg_media,
+        btn_texto=payload.btn_texto
+    )
+    db.add(novo_passo)
+    db.commit()
+    return {"status": "success"}
+
+@app.put("/api/admin/bots/{bot_id}/flow/steps/{step_id}")
+def atualizar_passo_flow(bot_id: int, step_id: int, dados: FlowStepUpdate, db: Session = Depends(get_db)):
+    """Atualiza um passo intermediário existente"""
+    passo = db.query(BotFlowStep).filter(
+        BotFlowStep.id == step_id,
+        BotFlowStep.bot_id == bot_id
+    ).first()
+    
+    if not passo:
+        raise HTTPException(status_code=404, detail="Passo não encontrado")
+    
+    # Atualiza apenas os campos enviados
+    if dados.msg_texto is not None:
+        passo.msg_texto = dados.msg_texto
+    if dados.msg_media is not None:
+        passo.msg_media = dados.msg_media
+    if dados.btn_texto is not None:
+        passo.btn_texto = dados.btn_texto
+    if dados.autodestruir is not None:
+        passo.autodestruir = dados.autodestruir
+    if dados.mostrar_botao is not None:
+        passo.mostrar_botao = dados.mostrar_botao
+    if dados.delay_seconds is not None:
+        passo.delay_seconds = dados.delay_seconds
+    
+    db.commit()
+    db.refresh(passo)
+    return {"status": "success", "passo": passo}
+
+
+@app.delete("/api/admin/bots/{bot_id}/flow/steps/{sid}")
+def remover_passo_flow(bot_id: int, sid: int, db: Session = Depends(get_db)):
+    passo = db.query(BotFlowStep).filter(BotFlowStep.id == sid, BotFlowStep.bot_id == bot_id).first()
+    if passo:
+        db.delete(passo)
+        db.commit()
+    return {"status": "deleted"}
+
+# =========================================================
+# 📱 ROTAS DE MINI APP (LOJA VIRTUAL) & GESTÃO DE MODO
+# =========================================================
+
+# 0. Trocar Modo do Bot (Tradicional <-> Mini App)
+class BotModeUpdate(BaseModel):
+    modo: str # 'tradicional' ou 'miniapp'
+
+@app.post("/api/admin/bots/{bot_id}/mode")
+def switch_bot_mode(bot_id: int, dados: BotModeUpdate, db: Session = Depends(get_db)):
+    """Alterna entre Bot de Conversa (Tradicional) e Loja Web (Mini App)"""
+    bot = db.query(Bot).filter(Bot.id == bot_id).first()
+    if not bot:
+        raise HTTPException(status_code=404, detail="Bot não encontrado")
+    
+    # Aqui poderíamos salvar no banco se tivéssemos a coluna 'modo', 
+    # mas por enquanto vamos assumir que a existência de configuração de MiniApp
+    # ativa o modo. Se quiser formalizar, adicione 'modo' na tabela Bot.
+    
+    # Se mudar para MiniApp, cria config padrão se não existir
+    if dados.modo == 'miniapp':
+        config = db.query(MiniAppConfig).filter(MiniAppConfig.bot_id == bot_id).first()
+        if not config:
+            new_config = MiniAppConfig(bot_id=bot_id)
+            db.add(new_config)
+            db.commit()
+            
+    return {"status": "ok", "msg": f"Modo alterado para {dados.modo}"}
+
+# 1. Obter Configuração Completa (Usado pelo Frontend da Loja)
+@app.get("/api/miniapp/{bot_id}")
+def get_miniapp_data(bot_id: int, db: Session = Depends(get_db)):
+    # Busca Config
+    config = db.query(MiniAppConfig).filter(MiniAppConfig.bot_id == bot_id).first()
+    if not config:
+        # Retorna padrão se não existir
+        config = {
+            "background_value": "#000000",
+            "hero_title": "ACERVO PREMIUM",
+            "enable_popup": False
+        }
+    
+    # Busca Categorias
+    cats = db.query(MiniAppCategory).filter(MiniAppCategory.bot_id == bot_id).all()
+    
+    return {
+        "config": config,
+        "categories": cats
+    }
+
+# 2. Salvar Configuração Global
+@app.post("/api/admin/bots/{bot_id}/miniapp/config")
+def save_miniapp_config(bot_id: int, dados: MiniAppConfigUpdate, db: Session = Depends(get_db)):
+    config = db.query(MiniAppConfig).filter(MiniAppConfig.bot_id == bot_id).first()
+    
+    if not config:
+        config = MiniAppConfig(bot_id=bot_id)
+        db.add(config)
+    
+    # Atualiza campos se enviados
+    if dados.logo_url is not None: config.logo_url = dados.logo_url
+    if dados.background_type is not None: config.background_type = dados.background_type
+    if dados.background_value is not None: config.background_value = dados.background_value
+    
+    if dados.hero_title is not None: config.hero_title = dados.hero_title
+    if dados.hero_subtitle is not None: config.hero_subtitle = dados.hero_subtitle
+    if dados.hero_video_url is not None: config.hero_video_url = dados.hero_video_url
+    if dados.hero_btn_text is not None: config.hero_btn_text = dados.hero_btn_text
+    
+    if dados.enable_popup is not None: config.enable_popup = dados.enable_popup
+    if dados.popup_video_url is not None: config.popup_video_url = dados.popup_video_url
+    if dados.popup_text is not None: config.popup_text = dados.popup_text
+    
+    if dados.footer_text is not None: config.footer_text = dados.footer_text
+    
+    db.commit()
+    return {"status": "ok", "msg": "Configuração da loja salva!"}
+
+# 3. Criar Categoria
+@app.post("/api/admin/miniapp/categories")
+def create_miniapp_category(dados: MiniAppCategoryCreate, db: Session = Depends(get_db)):
+    # Gera slug se não vier
+    if not dados.slug:
+        import re
+        slug = dados.title.lower().strip()
+        slug = re.sub(r'[^a-z0-9]+', '-', slug).strip('-')
+        dados.slug = f"{slug}-{int(time.time())}"
+        
+    nova_cat = MiniAppCategory(
+        bot_id=dados.bot_id,
+        title=dados.title,
+        slug=dados.slug,
+        description=dados.description,
+        cover_image=dados.cover_image,
+        theme_color=dados.theme_color,
+        is_direct_checkout=dados.is_direct_checkout,
+        is_hacker_mode=dados.is_hacker_mode,
+        banner_desk_url=dados.banner_desk_url,
+        banner_mob_url=dados.banner_mob_url,
+        footer_banner_url=dados.footer_banner_url,
+        deco_line_url=dados.deco_line_url,
+        content_json=dados.content_json
+    )
+    db.add(nova_cat)
+    db.commit()
+    return {"status": "ok", "id": nova_cat.id}
+
+# 4. Listar Categorias de um Bot
+@app.get("/api/admin/bots/{bot_id}/miniapp/categories")
+def list_bot_categories(bot_id: int, db: Session = Depends(get_db)):
+    return db.query(MiniAppCategory).filter(MiniAppCategory.bot_id == bot_id).all()
+
+# 5. Deletar Categoria
+@app.delete("/api/admin/miniapp/categories/{cat_id}")
+def delete_miniapp_category(cat_id: int, db: Session = Depends(get_db)):
+    cat = db.query(MiniAppCategory).filter(MiniAppCategory.id == cat_id).first()
+    if cat:
+        db.delete(cat)
+        db.commit()
+    return {"status": "deleted"}
+
+
+# =========================================================
+# 💳 WEBHOOK PIX (PUSHIN PAY) - VERSÃO HTML BLINDADA
+# =========================================================
+@app.post("/webhook/pix")
+async def webhook_pix(request: Request, db: Session = Depends(get_db)):
+    print("🔔 WEBHOOK PIX CHEGOU!") 
+    try:
+        # 1. PEGA O CORPO BRUTO (Mais seguro contra erros de parsing)
+        body_bytes = await request.body()
+        body_str = body_bytes.decode("utf-8")
+        
+        # Tratamento de JSON ou Form Data
+        try:
+            data = json.loads(body_str)
+            if isinstance(data, list):
+                data = data[0]
+        except:
+            try:
+                parsed = urllib.parse.parse_qs(body_str)
+                data = {k: v[0] for k, v in parsed.items()}
+            except:
+                logger.error(f"❌ Não foi possível ler o corpo do webhook: {body_str}")
+                return {"status": "ignored"}
+
+        # 2. EXTRAÇÃO E NORMALIZAÇÃO DO ID
+        raw_tx_id = data.get("id") or data.get("external_reference") or data.get("uuid")
+        tx_id = str(raw_tx_id).lower() if raw_tx_id else None
+        
+        # Status
+        status_pix = str(data.get("status", "")).lower()
+        
+        # 🔥 AQUI ESTÁ O FILTRO: SÓ PASSA SE FOR PAGO
+        if status_pix not in ["paid", "approved", "completed", "succeeded"]:
+            return {"status": "ignored"}
+
+        # 3. BUSCA O PEDIDO
+        pedido = db.query(Pedido).filter((Pedido.txid == tx_id) | (Pedido.transaction_id == tx_id)).first()
+
+        if not pedido:
+            print(f"❌ Pedido {tx_id} não encontrado no banco.")
+            return {"status": "ok", "msg": "Order not found"}
+
+        if pedido.status == "approved" or pedido.status == "paid":
+            return {"status": "ok", "msg": "Already paid"}
+
+        # --- 4. CÁLCULO DA DATA DE EXPIRAÇÃO ---
+        now = datetime.utcnow()
+        data_validade = None 
+        
+        # A) Pelo ID do plano
+        if pedido.plano_id:
+            pid = int(pedido.plano_id) if str(pedido.plano_id).isdigit() else None
+            if pid:
+                plano_db = db.query(PlanoConfig).filter(PlanoConfig.id == pid).first()
+                if plano_db and plano_db.dias_duracao and plano_db.dias_duracao < 90000:
+                    data_validade = now + timedelta(days=plano_db.dias_duracao)
+
+        # B) Fallback pelo nome
+        if not data_validade and pedido.plano_nome:
+            nm = pedido.plano_nome.lower()
+            if "vital" not in nm and "mega" not in nm and "eterno" not in nm:
+                dias = 30 # Padrão
+                if "24" in nm or "diario" in nm or "1 dia" in nm: dias = 1
+                elif "semanal" in nm: dias = 7
+                elif "trimestral" in nm: dias = 90
+                elif "anual" in nm: dias = 365
+                data_validade = now + timedelta(days=dias)
+
+        # 5. ATUALIZA O PEDIDO
+        pedido.status = "approved" 
+        pedido.data_aprovacao = now
+        pedido.data_expiracao = data_validade     
+        pedido.custom_expiration = data_validade
+        pedido.mensagem_enviada = True
+        
+        # 🔥 Atualiza Funil (Para os gráficos funcionarem)
+        pedido.status_funil = 'fundo'
+        pedido.pagou_em = now
+        
+        db.commit()
+        
+        # 🔥 ATUALIZA ESTATÍSTICAS DE TRACKING (VENDAS/FATURAMENTO)
+        if pedido.tracking_id:
+            try:
+                t_link = db.query(TrackingLink).filter(TrackingLink.id == pedido.tracking_id).first()
+                if t_link:
+                    t_link.vendas += 1
+                    t_link.faturamento += pedido.valor
+                    db.commit()
+                    logger.info(f"📈 Tracking atualizado: {t_link.nome} (+R$ {pedido.valor})")
+            except Exception as e_track:
+                logger.error(f"Erro ao atualizar tracking: {e_track}")
+
+        texto_validade = data_validade.strftime("%d/%m/%Y") if data_validade else "VITALÍCIO ♾️"
+        print(f"✅ Pedido {tx_id} APROVADO! Validade: {texto_validade}")
+        
+        # 6. ENTREGA E NOTIFICAÇÕES (EM HTML)
+        try:
+            bot_data = db.query(Bot).filter(Bot.id == pedido.bot_id).first()
+            if bot_data:
+                tb = telebot.TeleBot(bot_data.token)
+                
+                # --- A) ENTREGA PRODUTO PRINCIPAL ---
+                try: 
+                    # Limpeza e Desbanimento
+                    canal_id = bot_data.id_canal_vip
+                    if str(canal_id).replace("-","").isdigit():
+                         canal_id = int(str(canal_id).strip())
+
+                    try: tb.unban_chat_member(canal_id, int(pedido.telegram_id))
+                    except: pass
+
+                    # Gera Link Único
+                    link_acesso = None
+                    try:
+                        convite = tb.create_chat_invite_link(
+                            chat_id=canal_id, 
+                            member_limit=1, 
+                            name=f"Venda {pedido.first_name}"
+                        )
+                        link_acesso = convite.invite_link
+                    except Exception as e_link:
+                        logger.warning(f"Erro ao gerar link: {e_link}. Usando link salvo.")
+                        link_acesso = pedido.link_acesso 
+
+                    if link_acesso:
+                        msg_cliente = (
+                            f"✅ <b>Pagamento Confirmado!</b>\n"
+                            f"📅 Validade: <b>{texto_validade}</b>\n\n"
+                            f"Seu acesso exclusivo:\n👉 {link_acesso}"
+                        )
+                        tb.send_message(int(pedido.telegram_id), msg_cliente, parse_mode="HTML")
+                    else:
+                        tb.send_message(int(pedido.telegram_id), f"✅ <b>Pagamento Confirmado!</b>\nVocê já pode acessar o canal VIP.", parse_mode="HTML")
+
+                except Exception as e_main:
+                    logger.error(f"Erro na entrega principal: {e_main}")
+
+                # --- B) ENTREGA DO ORDER BUMP (HTML) ---
+                if pedido.tem_order_bump:
+                    logger.info(f"🎁 [PIX] Entregando Order Bump...")
+                    try:
+                        bump_config = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_data.id).first()
+                        if bump_config and bump_config.link_acesso:
+                            msg_bump = f"""🎁 <b>BÔNUS LIBERADO!</b>
+
+Você também garantiu acesso ao: 
+👉 <b>{bump_config.nome_produto}</b>
+
+🔗 <b>Acesse seu conteúdo extra abaixo:</b>
+{bump_config.link_acesso}"""
+                            tb.send_message(int(pedido.telegram_id), msg_bump, parse_mode="HTML")
+                    except Exception as e_bump:
+                        logger.error(f"Erro ao entregar Bump: {e_bump}")
+
+                # --- C) NOTIFICAÇÃO AO ADMIN (CORRIGIDO: USA FUNÇÃO GLOBAL) ---
+                # 🔥 Agora avisa o admin principal E os admins extras
+                msg_admin = (
+                    f"💰 <b>VENDA REALIZADA!</b>\n\n"
+                    f"🤖 Bot: <b>{bot_data.nome}</b>\n"
+                    f"👤 Cliente: {pedido.first_name} (@{pedido.username})\n"
+                    f"📦 Plano: {pedido.plano_nome}\n"
+                    f"💵 Valor: <b>R$ {pedido.valor:.2f}</b>\n"
+                    f"📅 Vence em: {texto_validade}"
+                )
+                notificar_admin_principal(bot_data, msg_admin)
+
+        except Exception as e_tg:
+            print(f"❌ Erro Telegram/Entrega: {e_tg}")
+
+        return {"status": "received"}
+
+    except Exception as e:
+        print(f"❌ ERRO CRÍTICO NO WEBHOOK: {e}")
+        return {"status": "error"}
 
 # =========================================================
 # 💳 WEBHOOK PIX (PUSHIN PAY) - VERSÃO HTML BLINDADA

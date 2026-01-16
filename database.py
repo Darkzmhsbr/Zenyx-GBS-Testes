@@ -74,6 +74,10 @@ class Bot(Base):
     # Relacionamento com Tracking (Links pertencem a um bot)
     tracking_links = relationship("TrackingLink", back_populates="bot", cascade="all, delete-orphan")
 
+    # 🔥 [NOVO] Relacionamento com Mini App (Template Personalizável)
+    miniapp_config = relationship("MiniAppConfig", uselist=False, back_populates="bot", cascade="all, delete-orphan")
+    miniapp_categories = relationship("MiniAppCategory", back_populates="bot", cascade="all, delete-orphan")
+
 class BotAdmin(Base):
     __tablename__ = "bot_admins"
     id = Column(Integer, primary_key=True, index=True)
@@ -309,3 +313,61 @@ class Lead(Base):
     
     # 🔥 [NOVO] Rastreamento
     tracking_id = Column(Integer, ForeignKey("tracking_links.id"), nullable=True)
+
+# =========================================================
+# 📱 MINI APP (TEMPLATE PERSONALIZÁVEL) 🔥 NOVO
+# =========================================================
+
+# 1. Configuração Visual Global
+class MiniAppConfig(Base):
+    __tablename__ = "miniapp_config"
+    bot_id = Column(Integer, ForeignKey("bots.id"), primary_key=True)
+    
+    # Visual Base
+    logo_url = Column(String, nullable=True)
+    background_type = Column(String, default="solid") # 'solid', 'gradient', 'image'
+    background_value = Column(String, default="#000000") # Hex ou URL
+    
+    # Hero Section (Vídeo Topo)
+    hero_video_url = Column(String, nullable=True)
+    hero_title = Column(String, default="ACERVO PREMIUM")
+    hero_subtitle = Column(String, default="O maior acervo da internet.")
+    hero_btn_text = Column(String, default="LIBERAR CONTEÚDO 🔓")
+    
+    # Popup Promocional
+    enable_popup = Column(Boolean, default=False)
+    popup_video_url = Column(String, nullable=True)
+    popup_text = Column(String, default="VOCÊ GANHOU UM PRESENTE!")
+    
+    # Rodapé
+    footer_text = Column(String, default="© 2026 Premium Club.")
+
+    bot = relationship("Bot", back_populates="miniapp_config")
+
+# 2. Categorias e Conteúdo
+class MiniAppCategory(Base):
+    __tablename__ = "miniapp_categories"
+    id = Column(Integer, primary_key=True, index=True)
+    bot_id = Column(Integer, ForeignKey("bots.id"))
+    
+    slug = Column(String, index=True) # ex: 'pack-premium'
+    title = Column(String)
+    description = Column(String, nullable=True)
+    cover_image = Column(String, nullable=True) # Imagem do Card na Home
+    
+    # Estilo da Categoria
+    theme_color = Column(String, default="#c333ff") # Cor do botão/detalhes
+    deco_line_url = Column(String, nullable=True) # Linha decorativa
+    is_direct_checkout = Column(Boolean, default=False) # Se true, vai direto pro checkout
+    is_hacker_mode = Column(Boolean, default=False) # Efeito Matrix/Terminal
+    
+    # Imagens internas
+    banner_desk_url = Column(String, nullable=True)
+    banner_mob_url = Column(String, nullable=True)
+    footer_banner_url = Column(String, nullable=True)
+    
+    # JSON String para guardar a galeria/feed (videoPreview, modelName, etc)
+    # Usaremos JSON.dumps() para salvar e JSON.loads() para ler
+    content_json = Column(Text, nullable=True)
+    
+    bot = relationship("Bot", back_populates="miniapp_categories")
