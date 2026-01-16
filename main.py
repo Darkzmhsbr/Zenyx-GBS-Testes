@@ -21,7 +21,7 @@ from database import Lead  # Não esqueça de importar Lead!
 
 
 # Importa o banco e o script de reparo
-from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, engine
+from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, engine
 import update_db 
 
 from migration_v3 import executar_migracao_v3
@@ -58,16 +58,15 @@ def get_db():
 # ============================================================
 
 # FUNÇÃO 1: CRIAR OU ATUALIZAR LEAD (TOPO)
+# FUNÇÃO 1: CRIAR OU ATUALIZAR LEAD (TOPO) - ATUALIZADA
 def criar_ou_atualizar_lead(
     db: Session,
     user_id: str,
     nome: str,
     username: str,
-    bot_id: int
+    bot_id: int,
+    tracking_id: Optional[int] = None # 🔥 Novo Parâmetro
 ):
-    """
-    Cria ou atualiza um Lead quando usuário dá /start
-    """
     lead = db.query(Lead).filter(
         Lead.user_id == user_id,
         Lead.bot_id == bot_id
@@ -79,7 +78,9 @@ def criar_ou_atualizar_lead(
         lead.ultimo_contato = agora
         lead.nome = nome
         lead.username = username
-        logger.info(f"🔄 Lead atualizado: {nome} (ID: {user_id})")
+        # Se veio tracking novo, atualiza (atribuição de último clique)
+        if tracking_id:
+            lead.tracking_id = tracking_id
     else:
         lead = Lead(
             user_id=user_id,
@@ -89,15 +90,14 @@ def criar_ou_atualizar_lead(
             primeiro_contato=agora,
             ultimo_contato=agora,
             status='topo',
-            funil_stage='lead_frio'
+            funil_stage='lead_frio',
+            tracking_id=tracking_id # 🔥 Salva a origem
         )
         db.add(lead)
-        logger.info(f"✅ Novo LEAD criado: {nome} (TOPO - deu /start)")
     
     db.commit()
     db.refresh(lead)
     return lead
-
 
 # FUNÇÃO 2: MOVER LEAD PARA PEDIDO (MEIO)
 def mover_lead_para_pedido(
@@ -246,7 +246,7 @@ def on_startup():
                 "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS transaction_id VARCHAR;", 
                 "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS data_aprovacao TIMESTAMP WITHOUT TIME ZONE;",
                 "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS data_expiracao TIMESTAMP WITHOUT TIME ZONE;",
-                "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS custom_expiration TIMESTAMP WITHOUT TIME ZONE;", # <--- CRÍTICO PRO FRONTEND
+                "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS custom_expiration TIMESTAMP WITHOUT TIME ZONE;",
                 "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS link_acesso VARCHAR;",
                 "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS mensagem_enviada BOOLEAN DEFAULT FALSE;",
 
@@ -283,7 +283,35 @@ def on_startup():
                 """,
                 
                 # --- [CORREÇÃO 6] SUPORTE NO BOT (MENU) ---
-                "ALTER TABLE bots ADD COLUMN IF NOT EXISTS suporte_username VARCHAR;"
+                "ALTER TABLE bots ADD COLUMN IF NOT EXISTS suporte_username VARCHAR;",
+
+                # --- [CORREÇÃO 7] TABELAS DE TRACKING (RASTREAMENTO) ---
+                """
+                CREATE TABLE IF NOT EXISTS tracking_folders (
+                    id SERIAL PRIMARY KEY,
+                    nome VARCHAR,
+                    plataforma VARCHAR,
+                    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT now()
+                );
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS tracking_links (
+                    id SERIAL PRIMARY KEY,
+                    folder_id INTEGER REFERENCES tracking_folders(id),
+                    bot_id INTEGER REFERENCES bots(id),
+                    nome VARCHAR,
+                    codigo VARCHAR UNIQUE,
+                    origem VARCHAR DEFAULT 'outros',
+                    clicks INTEGER DEFAULT 0,
+                    leads INTEGER DEFAULT 0,
+                    vendas INTEGER DEFAULT 0,
+                    faturamento FLOAT DEFAULT 0.0,
+                    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT now()
+                );
+                """,
+                # Colunas de vínculo
+                "ALTER TABLE leads ADD COLUMN IF NOT EXISTS tracking_id INTEGER REFERENCES tracking_links(id);",
+                "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS tracking_id INTEGER REFERENCES tracking_links(id);"
             ]
             
             for cmd in comandos_sql:
@@ -1273,6 +1301,18 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         pedido.mensagem_enviada = True
         db.commit()
         
+        # 🔥 [NOVO] ATUALIZA ESTATÍSTICAS DE TRACKING (VENDAS/FATURAMENTO)
+        if pedido.tracking_id:
+            try:
+                t_link = db.query(TrackingLink).filter(TrackingLink.id == pedido.tracking_id).first()
+                if t_link:
+                    t_link.vendas += 1
+                    t_link.faturamento += pedido.valor
+                    db.commit()
+                    logger.info(f"📈 Tracking atualizado: {t_link.nome} (+R$ {pedido.valor})")
+            except Exception as e_track:
+                logger.error(f"Erro ao atualizar tracking: {e_track}")
+
         texto_validade = data_validade.strftime("%d/%m/%Y") if data_validade else "VITALÍCIO ♾️"
         print(f"✅ Pedido {tx_id} APROVADO! Validade: {texto_validade}")
         
@@ -1452,7 +1492,7 @@ def enviar_passo_automatico(bot_temp, chat_id, passo_atual, bot_db, db):
 # 🚀 WEBHOOK GERAL (PORTEIRO + BUMP + HTML + BTN CHECK STATUS)
 # =========================================================
 # =========================================================
-# 🚀 WEBHOOK GERAL (PORTEIRO + BUMP + HTML + MENUS)
+# 🚀 WEBHOOK GERAL (PORTEIRO + BUMP + HTML + MENUS + TRACKING)
 # =========================================================
 @app.post("/webhook/{token}")
 async def receber_update_telegram(token: str, req: Request, db: Session = Depends(get_db)):
@@ -1524,7 +1564,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
             # --- COMANDO /SUPORTE ---
             if txt == "/suporte":
                 if bot_db.suporte_username:
-                    # Remove @ se o usuário tiver colocado, para padronizar
                     sup = bot_db.suporte_username.replace("@", "")
                     bot_temp.send_message(chat_id, f"💬 <b>Falar com Suporte:</b>\n\n👉 @{sup}", parse_mode="HTML")
                 else:
@@ -1552,23 +1591,32 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     bot_temp.send_message(chat_id, "❌ <b>Nenhuma assinatura ativa encontrada.</b>\nDigite /start para ver os planos.", parse_mode="HTML")
                 return {"status": "ok"}
 
-            # --- COMANDO /START ---
+            # --- COMANDO /START (COM RASTREAMENTO) ---
             if txt == "/start" or txt.startswith("/start "):
                 first_name = message.from_user.first_name
                 username = message.from_user.username
                 
-                # Salva Lead
+                # 🔥 LÓGICA DE TRACKING
+                tracking_id_found = None
+                
+                parts = txt.split()
+                if len(parts) > 1:
+                    tracking_code = parts[1]
+                    
+                    track_link = db.query(TrackingLink).filter(TrackingLink.codigo == tracking_code).first()
+                    
+                    if track_link:
+                        tracking_id_found = track_link.id
+                        track_link.clicks += 1
+                        track_link.leads += 1
+                        db.commit()
+                        logger.info(f"🎯 Tracking detectado: {tracking_code} (+1 click)")
+
+                # Salva Lead com Tracking
                 try:
-                    lead = db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first()
-                    if not lead:
-                        lead = Lead(user_id=str(chat_id), nome=first_name, username=username, bot_id=bot_db.id, status="topo", funil_stage="lead_frio", created_at=datetime.utcnow())
-                        db.add(lead)
-                    else:
-                        lead.nome = first_name
-                        lead.username = username
-                        lead.ultimo_contato = datetime.utcnow()
-                    db.commit()
-                except: pass
+                    criar_ou_atualizar_lead(db, str(chat_id), first_name, username, bot_db.id, tracking_id_found)
+                except Exception as e_lead:
+                    logger.error(f"Erro ao salvar lead: {e_lead}")
 
                 # Fluxo
                 fluxo = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
@@ -1660,6 +1708,10 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 plano = db.query(PlanoConfig).filter(PlanoConfig.id == plano_id).first()
                 if not plano: return {"status": "error"}
 
+                # 🔥 BUSCA O LEAD PARA PEGAR O RASTREAMENTO
+                lead_origem = db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first()
+                track_id_pedido = lead_origem.tracking_id if lead_origem else None
+
                 bump = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_db.id, OrderBumpConfig.ativo == True).first()
                 
                 if bump:
@@ -1692,7 +1744,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         novo_pedido = Pedido(
                             bot_id=bot_db.id, telegram_id=str(chat_id), first_name=first_name, username=username,
                             plano_nome=plano.nome_exibicao, plano_id=plano.id, valor=plano.preco_atual,
-                            transaction_id=txid, qr_code=qr, status="pending", tem_order_bump=False, created_at=datetime.utcnow()
+                            transaction_id=txid, qr_code=qr, status="pending", tem_order_bump=False, created_at=datetime.utcnow(),
+                            tracking_id=track_id_pedido # 🔥 SALVA NO PEDIDO
                         )
                         db.add(novo_pedido)
                         db.commit()
@@ -1722,6 +1775,11 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 aceitou = "yes" in data
                 pid = data.split("_")[2]
                 plano = db.query(PlanoConfig).filter(PlanoConfig.id == pid).first()
+                
+                # 🔥 BUSCA O LEAD PARA PEGAR O RASTREAMENTO
+                lead_origem = db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first()
+                track_id_pedido = lead_origem.tracking_id if lead_origem else None
+
                 bump = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_db.id).first()
                 
                 if bump and bump.autodestruir:
@@ -1745,7 +1803,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     novo_pedido = Pedido(
                         bot_id=bot_db.id, telegram_id=str(chat_id), first_name=first_name, username=username,
                         plano_nome=nome_final, plano_id=plano.id, valor=valor_final,
-                        transaction_id=txid, qr_code=qr, status="pending", tem_order_bump=aceitou, created_at=datetime.utcnow()
+                        transaction_id=txid, qr_code=qr, status="pending", tem_order_bump=aceitou, created_at=datetime.utcnow(),
+                        tracking_id=track_id_pedido # 🔥 SALVA NO PEDIDO
                     )
                     db.add(novo_pedido)
                     db.commit()
@@ -1796,7 +1855,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             novo_pedido = Pedido(
                                 bot_id=bot_db.id, telegram_id=str(chat_id), first_name=first_name, username=username,
                                 plano_nome=f"{plano.nome_exibicao} (OFERTA)", plano_id=plano.id, valor=preco_final,
-                                transaction_id=txid, qr_code=qr, status="pending", tem_order_bump=False, created_at=datetime.utcnow()
+                                transaction_id=txid, qr_code=qr, status="pending", tem_order_bump=False, created_at=datetime.utcnow(),
+                                tracking_id=None # Promos não costumam ter tracking de link externo, mas de campanha
                             )
                             db.add(novo_pedido)
                             db.commit()

@@ -70,6 +70,9 @@ class Bot(Base):
     
     # Relacionamento com Order Bump
     order_bump = relationship("OrderBumpConfig", uselist=False, back_populates="bot", cascade="all, delete-orphan")
+    
+    # Relacionamento com Tracking (Links pertencem a um bot)
+    tracking_links = relationship("TrackingLink", back_populates="bot", cascade="all, delete-orphan")
 
 class BotAdmin(Base):
     __tablename__ = "bot_admins"
@@ -194,6 +197,39 @@ class BotFlowStep(Base):
     bot = relationship("Bot", back_populates="steps")
 
 # =========================================================
+# 🔗 TRACKING (RASTREAMENTO DE LINKS) 🔥 NOVO
+# =========================================================
+class TrackingFolder(Base):
+    __tablename__ = "tracking_folders"
+    id = Column(Integer, primary_key=True, index=True)
+    nome = Column(String)      # Ex: "Facebook Ads"
+    plataforma = Column(String) # Ex: "facebook", "instagram"
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    links = relationship("TrackingLink", back_populates="folder", cascade="all, delete-orphan")
+
+class TrackingLink(Base):
+    __tablename__ = "tracking_links"
+    id = Column(Integer, primary_key=True, index=True)
+    folder_id = Column(Integer, ForeignKey("tracking_folders.id"))
+    bot_id = Column(Integer, ForeignKey("bots.id"))
+    
+    nome = Column(String)      # Ex: "Stories Manhã"
+    codigo = Column(String, unique=True, index=True) # Ex: "xyz123" (o parâmetro do /start)
+    origem = Column(String, default="outros") # Ex: "story", "reels", "feed"
+    
+    # Métricas
+    clicks = Column(Integer, default=0)
+    leads = Column(Integer, default=0)
+    vendas = Column(Integer, default=0)
+    faturamento = Column(Float, default=0.0)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    folder = relationship("TrackingFolder", back_populates="links")
+    bot = relationship("Bot", back_populates="tracking_links")
+
+# =========================================================
 # 🛒 PEDIDOS
 # =========================================================
 class Pedido(Base):
@@ -226,9 +262,7 @@ class Pedido(Base):
     # Campo para identificar se comprou o Order Bump
     tem_order_bump = Column(Boolean, default=False)
     
-    # ============================================================
-    # CAMPOS - FUNIL DE VENDAS
-    # ============================================================
+    # --- CAMPOS FUNIL & TRACKING ---
     status_funil = Column(String(20), default='meio')
     funil_stage = Column(String(20), default='lead_quente')
     
@@ -242,16 +276,15 @@ class Pedido(Base):
     total_remarketings = Column(Integer, default=0)
     
     origem = Column(String(50), default='bot')
+    
+    # 🔥 [NOVO] Rastreamento
+    tracking_id = Column(Integer, ForeignKey("tracking_links.id"), nullable=True)
 
 
 # =========================================================
 # 🎯 TABELA: LEADS (TOPO DO FUNIL)
 # =========================================================
 class Lead(Base):
-    """
-    Tabela de Leads (TOPO do funil)
-    Armazena usuários que APENAS deram /start no bot
-    """
     __tablename__ = "leads"
     
     id = Column(Integer, primary_key=True, index=True)
@@ -273,3 +306,6 @@ class Lead(Base):
     ultimo_remarketing = Column(DateTime(timezone=True))
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # 🔥 [NOVO] Rastreamento
+    tracking_id = Column(Integer, ForeignKey("tracking_links.id"), nullable=True)
