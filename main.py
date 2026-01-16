@@ -1361,6 +1361,7 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         # Status
         status_pix = str(data.get("status", "")).lower()
         
+        # 🔥 AQUI ESTÁ O FILTRO: SÓ PASSA SE FOR PAGO
         if status_pix not in ["paid", "approved", "completed", "succeeded"]:
             return {"status": "ignored"}
 
@@ -1403,9 +1404,14 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         pedido.data_expiracao = data_validade     
         pedido.custom_expiration = data_validade
         pedido.mensagem_enviada = True
+        
+        # 🔥 Atualiza Funil (Para os gráficos funcionarem)
+        pedido.status_funil = 'fundo'
+        pedido.pagou_em = now
+        
         db.commit()
         
-        # 🔥 [NOVO] ATUALIZA ESTATÍSTICAS DE TRACKING (VENDAS/FATURAMENTO)
+        # 🔥 ATUALIZA ESTATÍSTICAS DE TRACKING (VENDAS/FATURAMENTO)
         if pedido.tracking_id:
             try:
                 t_link = db.query(TrackingLink).filter(TrackingLink.id == pedido.tracking_id).first()
@@ -1479,17 +1485,17 @@ Você também garantiu acesso ao:
                     except Exception as e_bump:
                         logger.error(f"Erro ao entregar Bump: {e_bump}")
 
-                # --- C) NOTIFICAÇÃO AO ADMIN (HTML) ---
-                if bot_data.admin_principal_id:
-                    msg_admin = (
-                        f"💰 <b>VENDA NO BOT {bot_data.nome}</b>\n"
-                        f"👤 {pedido.first_name} (@{pedido.username})\n"
-                        f"💎 {pedido.plano_nome}\n"
-                        f"💵 R$ {pedido.valor:.2f}\n"
-                        f"📅 Vence em: {texto_validade}"
-                    )
-                    try: tb.send_message(bot_data.admin_principal_id, msg_admin, parse_mode="HTML")
-                    except: print("Erro ao notificar admin")
+                # --- C) NOTIFICAÇÃO AO ADMIN (CORRIGIDO: USA FUNÇÃO GLOBAL) ---
+                # 🔥 Agora avisa o admin principal E os admins extras
+                msg_admin = (
+                    f"💰 <b>VENDA REALIZADA!</b>\n\n"
+                    f"🤖 Bot: <b>{bot_data.nome}</b>\n"
+                    f"👤 Cliente: {pedido.first_name} (@{pedido.username})\n"
+                    f"📦 Plano: {pedido.plano_nome}\n"
+                    f"💵 Valor: <b>R$ {pedido.valor:.2f}</b>\n"
+                    f"📅 Vence em: {texto_validade}"
+                )
+                notificar_admin_principal(bot_data, msg_admin)
 
         except Exception as e_tg:
             print(f"❌ Erro Telegram/Entrega: {e_tg}")
