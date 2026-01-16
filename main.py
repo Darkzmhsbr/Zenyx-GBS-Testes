@@ -1459,7 +1459,10 @@ def enviar_passo_automatico(bot_temp, chat_id, passo_atual, bot_db, db):
         logger.error(f"Erro no passo automático {passo_atual.step_order}: {e}")
 
 # =========================================================
-# 🚀 WEBHOOK GERAL (PORTEIRO + ORDER BUMP + FLUXO + HTML)
+# 🚀 WEBHOOK GERAL (GATEKEEPER + ORDER BUMP + HTML + FIX PROMO)
+# =========================================================
+# =========================================================
+# 🚀 WEBHOOK GERAL (PORTEIRO + ORDER BUMP + FLUXO + HTML + PROMO FULL)
 # =========================================================
 @app.post("/webhook/{token}")
 async def receber_update_telegram(token: str, req: Request, db: Session = Depends(get_db)):
@@ -1478,20 +1481,21 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
         update = telebot.types.Update.de_json(body)
         bot_temp = telebot.TeleBot(token)
         
+        # Define message com segurança (Correção do erro "message not defined")
+        message = update.message if update.message else None
+        
         # ============================================================
-        # 🚪 1. O PORTEIRO (GATEKEEPER) - SUA LÓGICA ORIGINAL PRESERVADA
+        # 🚪 1. O PORTEIRO (GATEKEEPER)
         # ============================================================
-        if update.message and update.message.new_chat_members:
-            chat_id = str(update.message.chat.id)
-            # Limpa o ID do canal (remove espaços)
+        if message and message.new_chat_members:
+            chat_id = str(message.chat.id)
             canal_vip_id = str(bot_db.id_canal_vip).replace(" ", "").strip()
             
-            # Se a entrada for no Canal VIP
             if chat_id == canal_vip_id:
-                for member in update.message.new_chat_members:
+                for member in message.new_chat_members:
                     if member.is_bot: continue
                     
-                    # Busca o último pedido pago/aprovado deste usuário
+                    # Busca pedido pago/aprovado
                     pedido = db.query(Pedido).filter(
                         Pedido.bot_id == bot_db.id,
                         Pedido.telegram_id == str(member.id),
@@ -1499,695 +1503,315 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     ).order_by(desc(Pedido.created_at)).first()
                     
                     allowed = False
-                    
                     if pedido:
-                        # A) Verifica por DATA (Sistema Novo)
                         if pedido.data_expiracao:
-                            if datetime.utcnow() < pedido.data_expiracao:
-                                allowed = True
-                        
-                        # B) Verifica por NOME (Sistema Antigo - Fallback)
-                        # Isso garante que vendas antigas continuem funcionando
+                            if datetime.utcnow() < pedido.data_expiracao: allowed = True
                         elif pedido.plano_nome:
                             nm = pedido.plano_nome.lower()
-                            if "vital" in nm or "mega" in nm or "eterno" in nm:
-                                allowed = True
+                            if "vital" in nm or "mega" in nm or "eterno" in nm: allowed = True
                             else:
-                                # Recalcula dias baseado no nome (Lógica antiga)
                                 d = 30
                                 if "diario" in nm or "24" in nm: d = 1
                                 elif "semanal" in nm: d = 7
                                 elif "trimestral" in nm: d = 90
                                 elif "anual" in nm: d = 365
-                                
-                                # Verifica validade calculada
                                 if pedido.created_at and datetime.utcnow() < (pedido.created_at + timedelta(days=d)):
                                     allowed = True
                     
-                    # Se não for permitido, bane e desbane (Kick)
                     if not allowed:
-                        logger.warning(f"🚫 [PORTEIRO] Intruso detectado: {member.first_name} ({member.id}). Banindo...")
                         try:
                             bot_temp.ban_chat_member(chat_id, member.id)
-                            bot_temp.unban_chat_member(chat_id, member.id) # Permite entrar de novo se pagar
-                            
-                            # Tenta avisar o usuário no privado
+                            bot_temp.unban_chat_member(chat_id, member.id)
                             try:
                                 bot_temp.send_message(member.id, "🚫 <b>Acesso Negado.</b>\nPor favor, realize o pagamento para entrar.", parse_mode="HTML")
                             except: pass
-                        except Exception as e:
-                            logger.error(f"❌ Erro ao banir intruso: {e}")
+                        except: pass
             
             return {"status": "checked"}
-        
+
         # ============================================================
-        # 👋 COMANDO /START (MENSAGEM DE BOAS-VINDAS + FLUXO)
+        # 👋 2. COMANDO /START
         # ============================================================
-        if message.text == "/start" or message.text.startswith("/start "):
-            # 1. Salva/Atualiza Lead (MANTENDO SUA LÓGICA ORIGINAL)
+        if message and message.text and (message.text == "/start" or message.text.startswith("/start ")):
+            chat_id = message.chat.id
+            first_name = message.from_user.first_name
+            username = message.from_user.username
+            
+            # --- SALVA LEAD ---
             try:
-                # Tenta buscar lead existente
                 lead = db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first()
-                
                 if not lead:
-                    # Cria novo se não existir
-                    lead = Lead(
-                        user_id=str(chat_id),
-                        nome=first_name or "Sem nome",
-                        username=username or "",
-                        bot_id=bot_db.id,
-                        status="topo",
-                        funil_stage="lead_frio",
-                        created_at=datetime.utcnow()
-                    )
+                    lead = Lead(user_id=str(chat_id), nome=first_name, username=username, bot_id=bot_db.id, status="topo", funil_stage="lead_frio", created_at=datetime.utcnow())
                     db.add(lead)
-                    logger.info(f"✅ [BOT {bot_db.id}] Lead criado: {first_name} (ID: {chat_id})")
                 else:
-                    # Atualiza existente
-                    lead.nome = first_name or lead.nome
-                    lead.username = username or lead.username
+                    lead.nome = first_name
+                    lead.username = username
                     lead.ultimo_contato = datetime.utcnow()
-                    logger.info(f"🔄 Lead atualizado: {first_name} (ID: {chat_id})")
-                
                 db.commit()
-            except Exception as e_lead:
-                logger.error(f"❌ Erro ao salvar lead no start: {e_lead}")
+            except: pass
 
-            # 2. Carrega Fluxo Personalizado (Passo 1)
+            # --- CARREGA FLUXO ---
             fluxo = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
-            
-            # Texto padrão se não tiver nada configurado
-            msg_texto = "Olá! Seja bem-vindo ao nosso atendimento."
-            msg_media = None
-            mostrar_planos_1 = False
-            
-            if fluxo:
-                msg_texto = fluxo.msg_boas_vindas or msg_texto
-                msg_media = fluxo.media_url
-                mostrar_planos_1 = fluxo.mostrar_planos_1
+            msg_texto = fluxo.msg_boas_vindas if fluxo else "Olá! Seja bem-vindo."
+            msg_media = fluxo.media_url if fluxo else None
+            mostrar_planos_1 = fluxo.mostrar_planos_1 if fluxo else False
 
-            # 3. Envia a Mensagem 1 (HTML)
             markup = types.InlineKeyboardMarkup()
             
-            # 🔥 LÓGICA NOVA: SE MOSTRAR PLANOS ESTIVER ATIVO NA MENSAGEM 1
             if mostrar_planos_1:
-                logger.info(f"💎 [BOT {bot_db.id}] Mostrar Planos na msg 1 ativado. Exibindo checkout direto.")
                 planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_db.id).all()
                 for p in planos:
-                    mk_btn = types.InlineKeyboardButton(
-                        f"💎 {p.nome_exibicao} - R$ {p.preco_atual:.2f}", 
-                        callback_data=f"checkout_{p.id}" 
-                    )
-                    markup.add(mk_btn)
+                    markup.add(types.InlineKeyboardButton(f"💎 {p.nome_exibicao} - R$ {p.preco_atual:.2f}", callback_data=f"checkout_{p.id}"))
             else:
-                # Botão normal de "Desbloquear/Próximo"
-                btn_text = fluxo.btn_text_1 if (fluxo and fluxo.btn_text_1) else "🔓 VER CONTEÚDO"
-                markup.add(types.InlineKeyboardButton(btn_text, callback_data="step_1"))
+                btn_txt = fluxo.btn_text_1 if (fluxo and fluxo.btn_text_1) else "🔓 VER CONTEÚDO"
+                markup.add(types.InlineKeyboardButton(btn_txt, callback_data="step_1"))
 
+            # Envia (HTML)
             try:
                 if msg_media:
-                    # Verifica extensão
-                    if msg_media.lower().endswith(('.mp4', '.mov', '.avi')):
+                    if msg_media.lower().endswith(('.mp4', '.mov')):
                         bot_temp.send_video(chat_id, msg_media, caption=msg_texto, reply_markup=markup, parse_mode="HTML")
                     else:
                         bot_temp.send_photo(chat_id, msg_media, caption=msg_texto, reply_markup=markup, parse_mode="HTML")
                 else:
                     bot_temp.send_message(chat_id, msg_texto, reply_markup=markup, parse_mode="HTML")
-            except Exception as e:
-                logger.error(f"Erro ao enviar start: {e}")
-                # Tenta enviar sem formatação se der erro no HTML
-                try:
-                    bot_temp.send_message(chat_id, msg_texto, reply_markup=markup) 
-                except: pass
+            except:
+                bot_temp.send_message(chat_id, msg_texto, reply_markup=markup) 
 
             return {"status": "ok"}
 
         # ============================================================
-        # TRECHO 1: CALLBACK "passo_2" (BOAS VINDAS -> PASSO 1)
+        # 🎮 3. CALLBACKS (BOTÕES)
         # ============================================================
-        elif update.callback_query and update.callback_query.data == "passo_2":
-            chat_id = update.callback_query.message.chat.id
-            msg_id = update.callback_query.message.message_id
-            
-            logger.info(f"🎯 [BOT {bot_db.id}] Usuário clicou em passo_2")
-            
-            # Busca o PRIMEIRO passo intermediário
-            primeiro_passo = db.query(BotFlowStep).filter(
-                BotFlowStep.bot_id == bot_db.id,
-                BotFlowStep.step_order == 1
-            ).first()
-            
-            if primeiro_passo:
-                logger.info(f"✅ [BOT {bot_db.id}] Encontrado passo 1: {primeiro_passo.msg_texto[:30]}...")
-                
-                # Verifica se existe passo 2
-                segundo_passo = db.query(BotFlowStep).filter(
-                    BotFlowStep.bot_id == bot_db.id, 
-                    BotFlowStep.step_order == 2
-                ).first()
-                
-                # Define callback do botão (caso tenha botão)
-                next_callback = "next_step_1" if segundo_passo else "go_checkout"
-                
-                # Auto-destruir mensagem de boas-vindas
-                if bot_db.fluxo.autodestruir_1:
-                    try: bot_temp.delete_message(chat_id, msg_id)
-                    except: pass
-                
-                # Cria botão se necessário
-                markup_step = types.InlineKeyboardMarkup()
-                if primeiro_passo.mostrar_botao:
-                    markup_step.add(types.InlineKeyboardButton(text=primeiro_passo.btn_texto, callback_data=next_callback))
-
-                # Envia o PASSO 1
-                sent_msg = None
-                if primeiro_passo.msg_media:
-                    try:
-                        if primeiro_passo.msg_media.lower().endswith(('.mp4', '.mov')):
-                            sent_msg = bot_temp.send_video(
-                                chat_id, 
-                                primeiro_passo.msg_media, 
-                                caption=primeiro_passo.msg_texto, 
-                                reply_markup=markup_step if primeiro_passo.mostrar_botao else None
-                            )
-                        else:
-                            sent_msg = bot_temp.send_photo(
-                                chat_id, 
-                                primeiro_passo.msg_media, 
-                                caption=primeiro_passo.msg_texto, 
-                                reply_markup=markup_step if primeiro_passo.mostrar_botao else None
-                            )
-                    except:
-                        sent_msg = bot_temp.send_message(
-                            chat_id, 
-                            primeiro_passo.msg_texto, 
-                            reply_markup=markup_step if primeiro_passo.mostrar_botao else None
-                        )
-                else:
-                    sent_msg = bot_temp.send_message(
-                        chat_id, 
-                        primeiro_passo.msg_texto, 
-                        reply_markup=markup_step if primeiro_passo.mostrar_botao else None
-                    )
-                
-                # --- LÓGICA AUTOMÁTICA (DELAY + SEM BOTÃO) ---
-                if not primeiro_passo.mostrar_botao and primeiro_passo.delay_seconds > 0:
-                    logger.info(f"⏰ [BOT {bot_db.id}] Aguardando {primeiro_passo.delay_seconds}s...")
-                    time.sleep(primeiro_passo.delay_seconds)
-                    
-                    if primeiro_passo.autodestruir and sent_msg:
-                        try: bot_temp.delete_message(chat_id, sent_msg.message_id)
-                        except: pass
-                    
-                    # 🔥 CORREÇÃO AQUI: Verifica se existe o passo 2.
-                    # Se SIM, manda ele. Se NÃO, manda a Oferta Final.
-                    if segundo_passo:
-                        enviar_passo_automatico(bot_temp, chat_id, segundo_passo, bot_db, db)
-                    else:
-                        enviar_oferta_final(bot_temp, chat_id, bot_db.fluxo, bot_db.id, db)
-            else:
-                # Se não tem nenhum passo intermediário
-                enviar_oferta_final(bot_temp, chat_id, bot_db.fluxo, bot_db.id, db)
-            
-            bot_temp.answer_callback_query(update.callback_query.id)
-
-
-        # ============================================================
-        # 🪜 NAVEGAÇÃO DO FLUXO (NEXT STEP) - VERSÃO HTML
-        # ============================================================
-        elif update.callback_query and update.callback_query.data.startswith("step_"):
-            chat_id = update.callback_query.message.chat.id
-            msg_id = update.callback_query.message.message_id
-            
-            # Pega índice do passo
-            try: current_step_index = int(update.callback_query.data.split("_")[1])
-            except: current_step_index = 1
-            
+        elif update.callback_query:
             try: bot_temp.answer_callback_query(update.callback_query.id)
             except: pass
-
-            # Busca passos
-            steps = db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_db.id).order_by(BotFlowStep.step_order).all()
             
-            # Lógica de Autodestruição do ANTERIOR (Sua lógica original)
-            # Se estamos indo para o passo 2, o anterior foi o passo 1 (ou msg de boas vindas)
-            # Aqui vamos simplificar: Se o passo ATUAL que clicamos tiver autodestruir, apagamos ele.
-            # Mas como não temos o ID do passo anterior fácil aqui, vamos focar no envio do PRÓXIMO.
-            
-            # Determina o objeto do PRÓXIMO passo
-            # Se current_step_index for 1, queremos o primeiro da lista (index 0)
-            next_step_obj = None
-            is_last_step = False
-            
-            if current_step_index <= len(steps):
-                next_step_obj = steps[current_step_index - 1] 
-            else:
-                is_last_step = True 
-
-            # --- CASO 1: TEM UM PRÓXIMO PASSO INTERMEDIÁRIO ---
-            if next_step_obj and not is_last_step:
-                markup = types.InlineKeyboardMarkup()
-                
-                # Configura botão do próximo
-                next_index = current_step_index + 1
-                if next_step_obj.mostrar_botao:
-                    btn_txt = next_step_obj.btn_texto or "Próximo ▶️"
-                    markup.add(types.InlineKeyboardButton(btn_txt, callback_data=f"step_{next_index}"))
-                
-                # Envia Mensagem (HTML)
-                sent_msg = None
-                try:
-                    if next_step_obj.msg_media:
-                        if next_step_obj.msg_media.lower().endswith(('.mp4', '.mov')):
-                            sent_msg = bot_temp.send_video(chat_id, next_step_obj.msg_media, caption=next_step_obj.msg_texto, reply_markup=markup, parse_mode="HTML")
-                        else:
-                            sent_msg = bot_temp.send_photo(chat_id, next_step_obj.msg_media, caption=next_step_obj.msg_texto, reply_markup=markup, parse_mode="HTML")
-                    else:
-                        sent_msg = bot_temp.send_message(chat_id, next_step_obj.msg_texto, reply_markup=markup, parse_mode="HTML")
-                except:
-                     # Fallback sem HTML
-                     sent_msg = bot_temp.send_message(chat_id, next_step_obj.msg_texto or "...", reply_markup=markup)
-
-                # --- LÓGICA AUTOMÁTICA (DELAY / AUTODESTRUIR) ---
-                if not next_step_obj.mostrar_botao and next_step_obj.delay_seconds > 0:
-                    time.sleep(next_step_obj.delay_seconds)
-                    
-                    if next_step_obj.autodestruir and sent_msg:
-                        try: bot_temp.delete_message(chat_id, sent_msg.message_id)
-                        except: pass
-                    
-                    # Avança automaticamente (Recursivo ou chama próximo)
-                    # Como estamos dentro do webhook, o ideal é chamar uma função auxiliar ou forçar o próximo passo
-                    # Mas para simplificar, vamos enviar o checkout se for o ultimo
-                    if current_step_index >= len(steps):
-                        # Manda oferta final
-                         pass # (A lógica aqui ficaria complexa para repetir, melhor deixar o fluxo normal)
-
-            # --- CASO 2: É O ÚLTIMO PASSO (OFERTA FINAL) ---
-            else:
-                fluxo = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
-                msg_final = fluxo.msg_2_texto if fluxo else "Confira nossos planos:"
-                media_final = fluxo.msg_2_media if fluxo else None
-                mostrar_planos = fluxo.mostrar_planos_2 if fluxo else True
-                
-                markup = types.InlineKeyboardMarkup()
-                
-                if mostrar_planos:
-                    planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_db.id).all()
-                    for p in planos:
-                        markup.add(types.InlineKeyboardButton(
-                            f"💎 {p.nome_exibicao} - R$ {p.preco_atual:.2f}", 
-                            callback_data=f"checkout_{p.id}"
-                        ))
-                
-                # Envia Final (HTML)
-                try:
-                    if media_final:
-                        if media_final.lower().endswith(('.mp4', '.mov')):
-                            bot_temp.send_video(chat_id, media_final, caption=msg_final, reply_markup=markup, parse_mode="HTML")
-                        else:
-                            bot_temp.send_photo(chat_id, media_final, caption=msg_final, reply_markup=markup, parse_mode="HTML")
-                    else:
-                        bot_temp.send_message(chat_id, msg_final, reply_markup=markup, parse_mode="HTML")
-                except:
-                     bot_temp.send_message(chat_id, msg_final, reply_markup=markup)
-
-# ============================================================
-# 🔥 CORREÇÃO: Handler promo_ com LOGS DETALHADOS
-# LOCALIZAÇÃO: Linha 1474-1587
-# PROBLEMA: "Oferta não encontrada" mesmo com UUID correto
-# SOLUÇÃO: Adicionar logs + Verificações
-# ============================================================
-
-        # SUBSTITUA TODO O BLOCO de linhas 1474-1587 por este:
-
-        # ============================================================
-        # 🔥 PROMOÇÃO DE REMARKETING (ATIVAR OFERTA)
-        # ============================================================
-        elif update.callback_query and update.callback_query.data.startswith("promo_"):
             chat_id = update.callback_query.message.chat.id
+            data = update.callback_query.data
             first_name = update.callback_query.from_user.first_name
             username = update.callback_query.from_user.username
-            campanha_uuid = update.callback_query.data.split("_")[1]
-            
-            logger.info(f"🔍 [WEBHOOK] Promo ativada: {campanha_uuid} por {chat_id}")
-            
-            # Buscar campanha
-            campanha = db.query(RemarketingCampaign).filter(
-                RemarketingCampaign.campaign_id == campanha_uuid
-            ).first()
-            
-            if not campanha:
-                bot_temp.send_message(chat_id, "❌ Oferta não encontrada ou expirada.")
-                return {"status": "error"}
-            
-            # Verifica expiração
-            if campanha.expiration_at and datetime.utcnow() > campanha.expiration_at:
-                msg_esgotado = "🚫 <b>OFERTA ENCERRADA!</b>\n\nO tempo desta oferta acabou."
-                bot_temp.send_message(chat_id, msg_esgotado, parse_mode="HTML")
-                bot_temp.answer_callback_query(update.callback_query.id, "Expirado")
-                return {"status": "expired"}
 
-            # Buscar plano
-            plano = db.query(PlanoConfig).filter(PlanoConfig.id == campanha.plano_id).first()
-            if not plano:
-                bot_temp.send_message(chat_id, "❌ Plano da oferta não encontrado.")
-                return {"status": "error"}
-            
-            # Calcular preço (Promo ou Original)
-            preco_final = campanha.promo_price if campanha.promo_price else plano.preco_atual
-            
-            msg_aguarde = bot_temp.send_message(
-                chat_id, 
-                "🛑♻️ Gerando sua <b>OFERTA ESPECIAL</b> ... Aguarde um instante.",
-                parse_mode="HTML"
-            )
-            
-            temp_uuid = str(uuid.uuid4())
-            pix_data = gerar_pix_pushinpay(preco_final, temp_uuid)
-            
-            if pix_data:
-                qr_code_text = pix_data.get("qr_code_text") or pix_data.get("qr_code")
-                provider_id = pix_data.get("id") or temp_uuid
-                final_tx_id = str(provider_id).lower()
-
-                # Salva ou Atualiza Pedido
-                pedido_existente = db.query(Pedido).filter(
-                    Pedido.telegram_id == str(chat_id),
-                    Pedido.bot_id == bot_db.id
-                ).first()
-
-                if pedido_existente:
-                    pedido_existente.plano_nome = f"{plano.nome_exibicao} (OFERTA)"
-                    pedido_existente.plano_id = plano.id
-                    pedido_existente.valor = preco_final
-                    pedido_existente.status = "pending"
-                    pedido_existente.transaction_id = final_tx_id
-                    pedido_existente.qr_code = qr_code_text
-                    pedido_existente.tem_order_bump = False # Promoção geralmente não tem bump automático
-                    pedido_existente.created_at = datetime.utcnow()
-                    if plano.dias_duracao == 99999: pedido_existente.custom_expiration = None
-                    db.commit()
+            # --- A) NAVEGAÇÃO (step_) ---
+            if data.startswith("step_"):
+                try: current_step = int(data.split("_")[1])
+                except: current_step = 1
+                
+                steps = db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_db.id).order_by(BotFlowStep.step_order).all()
+                
+                target_step = None
+                is_last = False
+                if current_step <= len(steps):
+                    target_step = steps[current_step - 1]
                 else:
-                    novo_pedido = Pedido(
-                        bot_id=bot_db.id, transaction_id=final_tx_id, telegram_id=str(chat_id),
-                        first_name=first_name, username=username, 
-                        plano_nome=f"{plano.nome_exibicao} (OFERTA)",
-                        plano_id=plano.id, valor=preco_final, status="pending", qr_code=qr_code_text,
-                        tem_order_bump=False, created_at=datetime.utcnow()
-                    )
-                    db.add(novo_pedido)
-                    db.commit()
+                    is_last = True
 
-                try: bot_temp.delete_message(chat_id, msg_aguarde.message_id)
-                except: pass
-
-                # Envia o PIX (HTML)
-                legenda_pix = f"""🎉 <b>OFERTA ATIVADA COM SUCESSO!</b>
-🎁 Plano: <b>{plano.nome_exibicao}</b>
-💸 Valor Promocional: <b>R$ {preco_final:.2f}</b>
-
-Copie o código abaixo para garantir sua vaga:
-
-<pre>{qr_code_text}</pre>
-
-👆 Toque no código para copiar.
-⏳ Pague agora antes que expire!"""
-
-                bot_temp.send_message(chat_id, legenda_pix, parse_mode="HTML")
-            else:
-                bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX da oferta.")
-
-            bot_temp.answer_callback_query(update.callback_query.id)
-            return {"status": "processed"}
-
-        # ============================================================
-        # 🛒 CHECKOUT (COM INTERCEPTAÇÃO DE ORDER BUMP)
-        # ============================================================
-        elif update.callback_query and update.callback_query.data.startswith("checkout_"):
-            chat_id = update.callback_query.message.chat.id
-            first_name = update.callback_query.from_user.first_name
-            username = update.callback_query.from_user.username
-            plano_id = update.callback_query.data.split("_")[1]
-            
-            plano = db.query(PlanoConfig).filter(PlanoConfig.id == plano_id).first()
-            if not plano:
-                bot_temp.send_message(chat_id, "❌ Plano não encontrado.")
-                return {"status": "error"}
-
-            # --- VERIFICA SE TEM ORDER BUMP ATIVO ---
-            bump_config = db.query(OrderBumpConfig).filter(
-                OrderBumpConfig.bot_id == bot_db.id,
-                OrderBumpConfig.ativo == True
-            ).first()
-
-            if bump_config:
-                # 🛑 TEM BUMP: Manda a oferta extra em vez do PIX
-                logger.info(f"🛒 [BOT {bot_db.id}] Order Bump detectado! Enviando oferta para {chat_id}")
-                
-                markup_bump = types.InlineKeyboardMarkup()
-                markup_bump.row(
-                    types.InlineKeyboardButton(f"{bump_config.btn_aceitar} (+ R$ {bump_config.preco:.2f})", callback_data=f"bump_yes_{plano.id}"),
-                    types.InlineKeyboardButton(bump_config.btn_recusar, callback_data=f"bump_no_{plano.id}")
-                )
-                
-                texto_bump = bump_config.msg_texto if bump_config.msg_texto else f"Gostaria de levar {bump_config.nome_produto} junto?"
-                
-                if bump_config.msg_media:
+                if target_step and not is_last:
+                    mk = types.InlineKeyboardMarkup()
+                    if target_step.mostrar_botao:
+                        mk.add(types.InlineKeyboardButton(target_step.btn_texto or "Próximo ▶️", callback_data=f"step_{current_step + 1}"))
+                    
+                    sent_msg = None
                     try:
-                        if bump_config.msg_media.lower().endswith(('.mp4', '.mov')):
-                            bot_temp.send_video(chat_id, bump_config.msg_media, caption=texto_bump, reply_markup=markup_bump, parse_mode="HTML")
+                        if target_step.msg_media:
+                            if target_step.msg_media.lower().endswith(('.mp4', '.mov')):
+                                sent_msg = bot_temp.send_video(chat_id, target_step.msg_media, caption=target_step.msg_texto, reply_markup=mk, parse_mode="HTML")
+                            else:
+                                sent_msg = bot_temp.send_photo(chat_id, target_step.msg_media, caption=target_step.msg_texto, reply_markup=mk, parse_mode="HTML")
                         else:
-                            bot_temp.send_photo(chat_id, bump_config.msg_media, caption=texto_bump, reply_markup=markup_bump, parse_mode="HTML")
+                            sent_msg = bot_temp.send_message(chat_id, target_step.msg_texto, reply_markup=mk, parse_mode="HTML")
                     except:
-                        bot_temp.send_message(chat_id, texto_bump, reply_markup=markup_bump, parse_mode="HTML")
+                        sent_msg = bot_temp.send_message(chat_id, target_step.msg_texto or "...", reply_markup=mk)
+
+                    # Delay Automático
+                    if not target_step.mostrar_botao and target_step.delay_seconds > 0:
+                        time.sleep(target_step.delay_seconds)
+                        if target_step.autodestruir and sent_msg:
+                            try: bot_temp.delete_message(chat_id, sent_msg.message_id)
+                            except: pass
+                        
+                        prox = db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_db.id, BotFlowStep.step_order == target_step.step_order + 1).first()
+                        if prox:
+                            enviar_passo_automatico(bot_temp, chat_id, prox, bot_db, db)
+                        else:
+                            enviar_oferta_final(bot_temp, chat_id, bot_db.fluxo, bot_db.id, db)
                 else:
-                    bot_temp.send_message(chat_id, texto_bump, reply_markup=markup_bump, parse_mode="HTML")
-                
-            else:
-                # 🚀 SEM BUMP: Segue fluxo normal
-                logger.info(f"🛒 [BOT {bot_db.id}] Sem Order Bump. Gerando PIX normal...")
-                
-                msg_aguarde = bot_temp.send_message(
-                    chat_id, 
-                    "🛑♻️ Seu <b>Pagamento</b> está sendo <b>GERADO</b> ... Aguarde um instante.",
-                    parse_mode="HTML"
-                )
-                
-                temp_uuid = str(uuid.uuid4())
-                pix_data = gerar_pix_pushinpay(plano.preco_atual, temp_uuid)
-                
-                if pix_data:
-                    qr_code_text = pix_data.get("qr_code_text") or pix_data.get("qr_code")
-                    provider_id = pix_data.get("id") or temp_uuid
-                    final_tx_id = str(provider_id).lower()
+                    enviar_oferta_final(bot_temp, chat_id, bot_db.fluxo, bot_db.id, db)
 
-                    # Salva Pedido Normal
-                    pedido_existente = db.query(Pedido).filter(Pedido.telegram_id == str(chat_id), Pedido.bot_id == bot_db.id).first()
+            # --- B) CHECKOUT ---
+            elif data.startswith("checkout_"):
+                plano_id = data.split("_")[1]
+                plano = db.query(PlanoConfig).filter(PlanoConfig.id == plano_id).first()
+                if not plano: return {"status": "error"}
 
-                    if pedido_existente:
-                        pedido_existente.plano_nome = plano.nome_exibicao
-                        pedido_existente.plano_id = plano.id
-                        pedido_existente.valor = plano.preco_atual
-                        pedido_existente.status = "pending"
-                        pedido_existente.transaction_id = final_tx_id
-                        pedido_existente.qr_code = qr_code_text
-                        pedido_existente.tem_order_bump = False
-                        pedido_existente.created_at = datetime.utcnow()
-                        if plano.dias_duracao == 99999: pedido_existente.custom_expiration = None
-                        db.commit()
-                    else:
+                bump = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_db.id, OrderBumpConfig.ativo == True).first()
+                
+                if bump:
+                    mk = types.InlineKeyboardMarkup()
+                    mk.row(
+                        types.InlineKeyboardButton(f"{bump.btn_aceitar} (+ R$ {bump.preco:.2f})", callback_data=f"bump_yes_{plano.id}"),
+                        types.InlineKeyboardButton(bump.btn_recusar, callback_data=f"bump_no_{plano.id}")
+                    )
+                    txt_bump = bump.msg_texto or f"Levar {bump.nome_produto} junto?"
+                    try:
+                        if bump.msg_media:
+                            if bump.msg_media.lower().endswith(('.mp4','.mov')):
+                                bot_temp.send_video(chat_id, bump.msg_media, caption=txt_bump, reply_markup=mk, parse_mode="HTML")
+                            else:
+                                bot_temp.send_photo(chat_id, bump.msg_media, caption=txt_bump, reply_markup=mk, parse_mode="HTML")
+                        else:
+                            bot_temp.send_message(chat_id, txt_bump, reply_markup=mk, parse_mode="HTML")
+                    except:
+                        bot_temp.send_message(chat_id, txt_bump, reply_markup=mk, parse_mode="HTML")
+                else:
+                    # Gera PIX direto
+                    msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando <b>PIX</b>...", parse_mode="HTML")
+                    mytx = str(uuid.uuid4())
+                    pix = gerar_pix_pushinpay(plano.preco_atual, mytx)
+                    
+                    if pix:
+                        qr = pix.get('qr_code_text') or pix.get('qr_code')
+                        txid = str(pix.get('id') or mytx).lower()
+                        
                         novo_pedido = Pedido(
-                            bot_id=bot_db.id, transaction_id=final_tx_id, telegram_id=str(chat_id),
-                            first_name=first_name, username=username, plano_nome=plano.nome_exibicao,
-                            plano_id=plano.id, valor=plano.preco_atual, status="pending", qr_code=qr_code_text,
-                            tem_order_bump=False, created_at=datetime.utcnow()
+                            bot_id=bot_db.id, telegram_id=str(chat_id), first_name=first_name, username=username,
+                            plano_nome=plano.nome_exibicao, plano_id=plano.id, valor=plano.preco_atual,
+                            transaction_id=txid, qr_code=qr, status="pending", tem_order_bump=False, created_at=datetime.utcnow()
                         )
                         db.add(novo_pedido)
                         db.commit()
+                        
+                        try: bot_temp.delete_message(chat_id, msg_wait.message_id)
+                        except: pass
+                        
+                        msg_pix = f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n💰 Valor: <b>R$ {plano.preco_atual:.2f}</b>\n\n<pre>{qr}</pre>\n\n👆 Copie o código acima."
+                        bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML")
+                    else:
+                        bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
 
-                    try: bot_temp.delete_message(chat_id, msg_aguarde.message_id)
+            # --- C) BUMP YES/NO ---
+            elif data.startswith("bump_yes_") or data.startswith("bump_no_"):
+                aceitou = "yes" in data
+                pid = data.split("_")[2]
+                plano = db.query(PlanoConfig).filter(PlanoConfig.id == pid).first()
+                bump = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_db.id).first()
+                
+                if bump and bump.autodestruir:
+                    try: bot_temp.delete_message(chat_id, update.callback_query.message.message_id)
                     except: pass
-
-                    # MENSAGEM PADRÃO (HTML com PRE)
-                    legenda_pix = f"""🌟 Seu pagamento foi gerado com sucesso:
-🎁 Plano: <b>{plano.nome_exibicao}</b>
-💰 Valor: <b>R$ {plano.preco_atual:.2f}</b>
-🔐 Pague via Pix Copia e Cola:
-
-<pre>{qr_code_text}</pre>
-
-👆 Toque no código acima para copiar
-‼️ Após o pagamento, o acesso será liberado automaticamente!"""
+                
+                valor_final = plano.preco_atual
+                nome_final = plano.nome_exibicao
+                if aceitou and bump:
+                    valor_final += bump.preco
+                    nome_final += f" + {bump.nome_produto}"
+                
+                msg_wait = bot_temp.send_message(chat_id, f"⏳ Gerando PIX: <b>{nome_final}</b>...", parse_mode="HTML")
+                mytx = str(uuid.uuid4())
+                pix = gerar_pix_pushinpay(valor_final, mytx)
+                
+                if pix:
+                    qr = pix.get('qr_code_text') or pix.get('qr_code')
+                    txid = str(pix.get('id') or mytx).lower()
                     
-                    bot_temp.send_message(chat_id, legenda_pix, parse_mode="HTML")
-                else:
-                    bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
-
-            bot_temp.answer_callback_query(update.callback_query.id)
-
-        # ============================================================
-        # 🛒 RESPOSTA ORDER BUMP: SIM (ACEITOU)
-        # ============================================================
-        elif update.callback_query and update.callback_query.data.startswith("bump_yes_"):
-            chat_id = update.callback_query.message.chat.id
-            msg_id = update.callback_query.message.message_id 
-            
-            first_name = update.callback_query.from_user.first_name
-            username = update.callback_query.from_user.username
-            plano_id = update.callback_query.data.split("_")[2]
-            
-            plano = db.query(PlanoConfig).filter(PlanoConfig.id == plano_id).first()
-            bump = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_db.id).first()
-            
-            if not plano or not bump:
-                bot_temp.send_message(chat_id, "❌ Erro: Oferta não encontrada.")
-                return {"status": "error"}
-            
-            # 🔥 LÓGICA DE AUTODESTRUIÇÃO
-            if bump.autodestruir:
-                try: bot_temp.delete_message(chat_id, msg_id)
-                except: pass
-
-            # --- CÁLCULOS E NOMES DO COMBO ---
-            preco_total = plano.preco_atual + bump.preco
-            nome_combo = f"{plano.nome_exibicao} + {bump.nome_produto}"
-            
-            logger.info(f"💰 [BOT {bot_db.id}] Cliente ACEITOU Bump. Total: R$ {preco_total:.2f}")
-            
-            msg_aguarde = bot_temp.send_message(chat_id, f"🛑♻️ Gerando combo: <b>{nome_combo}</b> ... Aguarde!", parse_mode="HTML")
-            
-            temp_uuid = str(uuid.uuid4())
-            pix_data = gerar_pix_pushinpay(preco_total, temp_uuid)
-            
-            if pix_data:
-                qr_code_text = pix_data.get("qr_code_text") or pix_data.get("qr_code")
-                provider_id = pix_data.get("id") or temp_uuid
-                final_tx_id = str(provider_id).lower()
-                
-                # Salva pedido COM FLAG DE BUMP
-                pedido_existente = db.query(Pedido).filter(Pedido.telegram_id == str(chat_id), Pedido.bot_id == bot_db.id).first()
-                
-                if pedido_existente:
-                    pedido_existente.plano_nome = nome_combo
-                    pedido_existente.plano_id = plano.id
-                    pedido_existente.valor = preco_total
-                    pedido_existente.status = "pending"
-                    pedido_existente.transaction_id = final_tx_id
-                    pedido_existente.qr_code = qr_code_text
-                    pedido_existente.tem_order_bump = True
-                    pedido_existente.created_at = datetime.utcnow()
-                    db.commit()
-                else:
                     novo_pedido = Pedido(
-                        bot_id=bot_db.id, transaction_id=final_tx_id, telegram_id=str(chat_id),
-                        first_name=first_name, username=username, plano_nome=nome_combo,
-                        plano_id=plano.id, valor=preco_total, status="pending", qr_code=qr_code_text,
-                        tem_order_bump=True, created_at=datetime.utcnow()
+                        bot_id=bot_db.id, telegram_id=str(chat_id), first_name=first_name, username=username,
+                        plano_nome=nome_final, plano_id=plano.id, valor=valor_final,
+                        transaction_id=txid, qr_code=qr, status="pending", tem_order_bump=aceitou, created_at=datetime.utcnow()
                     )
                     db.add(novo_pedido)
                     db.commit()
-                
-                try: bot_temp.delete_message(chat_id, msg_aguarde.message_id)
-                except: pass
-                
-                # --- MENSAGEM COMBO (HTML com PRE) ---
-                legenda_pix = f"""🌟 Seu pagamento foi gerado com sucesso:
-🎁 Plano: <b>{nome_combo}</b>
-💰 Valor: <b>R$ {preco_total:.2f}</b>
-🔐 Pague via Pix Copia e Cola:
+                    
+                    try: bot_temp.delete_message(chat_id, msg_wait.message_id)
+                    except: pass
+                    
+                    msg_pix = f"🎁 Plano: <b>{nome_final}</b>\n💰 Valor: <b>R$ {valor_final:.2f}</b>\n\n<pre>{qr}</pre>\n\n👆 Copie o código acima."
+                    bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML")
 
-<pre>{qr_code_text}</pre>
+            # --- D) PROMOÇÕES DE REMARKETING (LÓGICA COMPLETA) ---
+            elif data.startswith("promo_"):
+                try:
+                    campanha_uuid = data.split("_")[1]
+                except:
+                    bot_temp.send_message(chat_id, "❌ Erro no código da oferta.")
+                    return {"status": "error"}
 
-👆 Toque no código acima para copiar
-‼️ Após o pagamento, o acesso será liberado automaticamente!"""
-
-                bot_temp.send_message(chat_id, legenda_pix, parse_mode="HTML")
-            
-            bot_temp.answer_callback_query(update.callback_query.id)
-
-        # ============================================================
-        # 🛒 RESPOSTA ORDER BUMP: NÃO (RECUSOU)
-        # ============================================================
-        elif update.callback_query and update.callback_query.data.startswith("bump_no_"):
-            chat_id = update.callback_query.message.chat.id
-            msg_id = update.callback_query.message.message_id 
-            
-            first_name = update.callback_query.from_user.first_name
-            username = update.callback_query.from_user.username
-            plano_id = update.callback_query.data.split("_")[2]
-            
-            plano = db.query(PlanoConfig).filter(PlanoConfig.id == plano_id).first()
-            if not plano: return {"status": "error"}
-            
-            # 🔥 LÓGICA DE AUTODESTRUIÇÃO
-            bump_config = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_db.id).first()
-            if bump_config and bump_config.autodestruir:
-                try: bot_temp.delete_message(chat_id, msg_id)
-                except: pass
-            
-            logger.info(f"📉 [BOT {bot_db.id}] Cliente RECUSOU Bump. Gerando apenas Plano: R$ {plano.preco_atual:.2f}")
-            
-            msg_aguarde = bot_temp.send_message(chat_id, "🛑♻️ Gerando apenas o plano principal... Aguarde!", parse_mode="HTML")
-            
-            temp_uuid = str(uuid.uuid4())
-            pix_data = gerar_pix_pushinpay(plano.preco_atual, temp_uuid)
-            
-            if pix_data:
-                qr_code_text = pix_data.get("qr_code_text") or pix_data.get("qr_code")
-                provider_id = pix_data.get("id") or temp_uuid
-                final_tx_id = str(provider_id).lower()
+                logger.info(f"🔍 [WEBHOOK] Promo ativada: {campanha_uuid} por {chat_id}")
                 
-                # Salva pedido SEM BUMP
-                pedido_existente = db.query(Pedido).filter(Pedido.telegram_id == str(chat_id), Pedido.bot_id == bot_db.id).first()
+                campanha = db.query(RemarketingCampaign).filter(
+                    RemarketingCampaign.campaign_id == campanha_uuid
+                ).first()
                 
-                if pedido_existente:
-                    pedido_existente.plano_nome = plano.nome_exibicao
-                    pedido_existente.plano_id = plano.id
-                    pedido_existente.valor = plano.preco_atual
-                    pedido_existente.status = "pending"
-                    pedido_existente.transaction_id = final_tx_id
-                    pedido_existente.qr_code = qr_code_text
-                    pedido_existente.tem_order_bump = False
-                    pedido_existente.created_at = datetime.utcnow()
-                    db.commit()
+                if not campanha:
+                    bot_temp.send_message(chat_id, "❌ Oferta não encontrada ou expirada.")
+                
+                elif campanha.expiration_at and datetime.utcnow() > campanha.expiration_at:
+                    msg_esgotado = "🚫 <b>OFERTA ENCERRADA!</b>\n\nO tempo desta oferta acabou."
+                    bot_temp.send_message(chat_id, msg_esgotado, parse_mode="HTML")
+                
                 else:
-                    novo_pedido = Pedido(
-                        bot_id=bot_db.id, transaction_id=final_tx_id, telegram_id=str(chat_id),
-                        first_name=first_name, username=username, plano_nome=plano.nome_exibicao,
-                        plano_id=plano.id, valor=plano.preco_atual, status="pending", qr_code=qr_code_text,
-                        tem_order_bump=False, created_at=datetime.utcnow()
-                    )
-                    db.add(novo_pedido)
-                    db.commit()
-                
-                try: bot_temp.delete_message(chat_id, msg_aguarde.message_id)
-                except: pass
-                
-                # --- MENSAGEM PADRÃO (HTML com PRE) ---
-                legenda_pix = f"""🌟 Seu pagamento foi gerado com sucesso:
-🎁 Plano: <b>{plano.nome_exibicao}</b>
-💰 Valor: <b>R$ {plano.preco_atual:.2f}</b>
-🔐 Pague via Pix Copia e Cola:
+                    # Busca plano
+                    plano = db.query(PlanoConfig).filter(PlanoConfig.id == campanha.plano_id).first()
+                    if not plano:
+                        bot_temp.send_message(chat_id, "❌ Plano da oferta não encontrado.")
+                    else:
+                        # Preço da Promoção
+                        preco_final = campanha.promo_price if campanha.promo_price else plano.preco_atual
+                        
+                        msg_aguarde = bot_temp.send_message(
+                            chat_id, 
+                            "🛑♻️ Gerando sua <b>OFERTA ESPECIAL</b> ... Aguarde um instante.",
+                            parse_mode="HTML"
+                        )
+                        
+                        temp_uuid = str(uuid.uuid4())
+                        pix_data = gerar_pix_pushinpay(preco_final, temp_uuid)
+                        
+                        if pix_data:
+                            qr_code_text = pix_data.get("qr_code_text") or pix_data.get("qr_code")
+                            provider_id = pix_data.get("id") or temp_uuid
+                            final_tx_id = str(provider_id).lower()
 
-<pre>{qr_code_text}</pre>
+                            # Salva ou Atualiza Pedido
+                            pedido_existente = db.query(Pedido).filter(
+                                Pedido.telegram_id == str(chat_id),
+                                Pedido.bot_id == bot_db.id
+                            ).first()
 
-👆 Toque no código acima para copiar
-‼️ Após o pagamento, o acesso será liberado automaticamente!"""
+                            if pedido_existente:
+                                pedido_existente.plano_nome = f"{plano.nome_exibicao} (OFERTA)"
+                                pedido_existente.plano_id = plano.id
+                                pedido_existente.valor = preco_final
+                                pedido_existente.status = "pending"
+                                pedido_existente.transaction_id = final_tx_id
+                                pedido_existente.qr_code = qr_code_text
+                                pedido_existente.tem_order_bump = False
+                                pedido_existente.created_at = datetime.utcnow()
+                                if plano.dias_duracao == 99999: pedido_existente.custom_expiration = None
+                                db.commit()
+                            else:
+                                novo_pedido = Pedido(
+                                    bot_id=bot_db.id, transaction_id=final_tx_id, telegram_id=str(chat_id),
+                                    first_name=first_name, username=username, 
+                                    plano_nome=f"{plano.nome_exibicao} (OFERTA)",
+                                    plano_id=plano.id, valor=preco_final, status="pending", qr_code=qr_code_text,
+                                    tem_order_bump=False, created_at=datetime.utcnow()
+                                )
+                                db.add(novo_pedido)
+                                db.commit()
 
-                bot_temp.send_message(chat_id, legenda_pix, parse_mode="HTML")
-            
-            bot_temp.answer_callback_query(update.callback_query.id)
+                            try: bot_temp.delete_message(chat_id, msg_aguarde.message_id)
+                            except: pass
 
-            # --- FIM DOS ELIFS DO WEBHOOK ---
-        
-        # Retorno de sucesso para o Telegram não ficar repetindo a mensagem
-        return {"status": "processed"}
+                            msg_pix = f"🎉 <b>OFERTA ATIVADA COM SUCESSO!</b>\n🎁 Plano: <b>{plano.nome_exibicao}</b>\n💸 Valor Promocional: <b>R$ {preco_final:.2f}</b>\n\nCopie o código abaixo:\n\n<pre>{qr_code_text}</pre>\n\n👆 Toque no código para copiar."
+                            bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML")
+                        else:
+                            bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX da oferta.")
 
     except Exception as e:
-        # FECHAMENTO DO TRY PRINCIPAL DA FUNÇÃO WEBHOOK
-        logger.error(f"Erro no processamento do webhook: {e}")
-        return {"status": "error"}
+        logger.error(f"Erro no webhook: {e}")
+
+    return {"status": "ok"}
 
 # ============================================================
 # ROTA 1: LISTAR LEADS (TOPO DO FUNIL)
