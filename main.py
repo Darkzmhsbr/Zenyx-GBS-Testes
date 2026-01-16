@@ -616,27 +616,6 @@ class OrderBumpCreate(BaseModel):
     btn_aceitar: Optional[str] = "✅ SIM, ADICIONAR"
     btn_recusar: Optional[str] = "❌ NÃO, OBRIGADO"
 
-class OrderBumpConfig(Base):
-    __tablename__ = "order_bump_config"
-    id = Column(Integer, primary_key=True, index=True)
-    bot_id = Column(Integer, ForeignKey("bots.id"), unique=True)
-    
-    ativo = Column(Boolean, default=False)
-    nome_produto = Column(String)
-    preco = Column(Float)
-    link_acesso = Column(String, nullable=True)
-    
-    # 🔥 NOVO CAMPO
-    autodestruir = Column(Boolean, default=False) 
-    
-    msg_texto = Column(Text, default="Gostaria de adicionar este item?")
-    msg_media = Column(String, nullable=True)
-    
-    btn_aceitar = Column(String, default="✅ SIM, ADICIONAR")
-    btn_recusar = Column(String, default="❌ NÃO, OBRIGADO")
-    
-    bot = relationship("Bot", back_populates="order_bump")
-
 class IntegrationUpdate(BaseModel):
     token: str
 
