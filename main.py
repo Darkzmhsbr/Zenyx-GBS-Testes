@@ -420,7 +420,7 @@ def gerar_pix_pushinpay(valor_float: float, transaction_id: str):
     }
     
     # URL DO RAILWAY FIXA (Garante que o Webhook chegue)
-    seus_dominio = "zenyx-gbs-production.up.railway.app" 
+    seus_dominio = "zenyx-gbs-testes-production.up.railway.app" 
     
     payload = {
         "value": int(valor_float * 100), 
