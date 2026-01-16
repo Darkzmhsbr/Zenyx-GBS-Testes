@@ -1181,18 +1181,33 @@ def salvar_fluxo(bot_id: int, flow: FlowUpdate, db: Session = Depends(get_db)):
 # =========================================================
 # 🔗 ROTAS DE TRACKING (RASTREAMENTO)
 # =========================================================
-
 @app.get("/api/admin/tracking/folders")
 def list_tracking_folders(db: Session = Depends(get_db)):
-    """Lista pastas com contagem de links"""
+    """Lista pastas com contagem de links E métricas somadas"""
     try:
         folders = db.query(TrackingFolder).all()
         result = []
         for f in folders:
+            # Conta links
             link_count = db.query(TrackingLink).filter(TrackingLink.folder_id == f.id).count()
+            
+            # Soma cliques e vendas de todos os links desta pasta
+            stats = db.query(
+                func.sum(TrackingLink.clicks).label('total_clicks'),
+                func.sum(TrackingLink.vendas).label('total_vendas')
+            ).filter(TrackingLink.folder_id == f.id).first()
+            
+            clicks = stats.total_clicks or 0
+            vendas = stats.total_vendas or 0
+
             result.append({
-                "id": f.id, "nome": f.nome, "plataforma": f.plataforma, 
-                "link_count": link_count, "created_at": f.created_at
+                "id": f.id, 
+                "nome": f.nome, 
+                "plataforma": f.plataforma, 
+                "link_count": link_count,
+                "total_clicks": clicks,   # 🔥 Dado Real
+                "total_vendas": vendas,   # 🔥 Dado Real
+                "created_at": f.created_at
             })
         return result
     except Exception as e:
