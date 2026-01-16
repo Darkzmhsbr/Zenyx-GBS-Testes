@@ -1028,11 +1028,12 @@ def listar_bots(db: Session = Depends(get_db)):
 # 💎 PLANOS & FLUXO
 # ===========================
 
-@app.post("/api/admin/plans")
-def criar_plano(plano: PlanoCreate, db: Session = Depends(get_db)):
+# 🔥 [CORRIGIDO] Rota ajustada para coincidir com o api.js (/bots/{id}/plans)
+@app.post("/api/admin/bots/{bot_id}/plans")
+def criar_plano(bot_id: int, plano: PlanoCreate, db: Session = Depends(get_db)):
     novo_plano = PlanoConfig(
-        bot_id=plano.bot_id,
-        key_id=f"plan_{plano.bot_id}_{plano.dias_duracao}d",
+        bot_id=bot_id, # Usa o ID da URL ou do corpo (garante integridade)
+        key_id=f"plan_{bot_id}_{plano.dias_duracao}d",
         nome_exibicao=plano.nome_exibicao,
         descricao=f"Acesso de {plano.dias_duracao} dias",
         preco_cheio=plano.preco * 2,
@@ -1043,7 +1044,8 @@ def criar_plano(plano: PlanoCreate, db: Session = Depends(get_db)):
     db.commit()
     return {"status": "ok"}
 
-@app.get("/api/admin/plans/{bot_id}")
+# 🔥 [CORRIGIDO] Rota ajustada para coincidir com o api.js (/bots/{id}/plans)
+@app.get("/api/admin/bots/{bot_id}/plans")
 def listar_planos(bot_id: int, db: Session = Depends(get_db)):
     return db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
 
