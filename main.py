@@ -619,6 +619,11 @@ class OrderBumpCreate(BaseModel):
 class IntegrationUpdate(BaseModel):
     token: str
 
+# --- MODELO DE PERFIL ---
+class ProfileUpdate(BaseModel):
+    name: str
+    avatar_url: Optional[str] = None
+
 # ✅ MODELO COMPLETO PARA O WIZARD DE REMARKETING
 # =========================================================
 # ✅ MODELO DE DADOS (ESPELHO DO REMARKETING.JSX)
@@ -3971,6 +3976,129 @@ async def tg_wh(token: str, req: Request, db: Session = Depends(get_db)):
         logger.error(f"Erro webhook: {e}")
         
     return {"status": "ok"}
+
+# =========================================================
+# 🏆 ROTA DE PERFIL & CONQUISTAS (PERFIL GLOBAL)
+# =========================================================
+@app.get("/api/admin/profile")
+def get_profile_stats(db: Session = Depends(get_db)):
+    """
+    Retorna dados do perfil do administrador + Estatísticas GLOBAIS de todos os bots.
+    Calcula o progresso para a próxima placa de faturamento.
+    """
+    try:
+        # 1. Busca Configurações de Perfil (SystemConfig)
+        conf_name = db.query(SystemConfig).filter(SystemConfig.key == "admin_name").first()
+        conf_avatar = db.query(SystemConfig).filter(SystemConfig.key == "admin_avatar").first()
+        
+        admin_name = conf_name.value if conf_name else "Administrador"
+        admin_avatar = conf_avatar.value if conf_avatar else ""
+
+        # 2. Estatísticas GLOBAIS (Soma de tudo)
+        
+        # A) Total de Bots Ativos
+        total_bots = db.query(Bot).count()
+        
+        # B) Total de Membros (Leads Únicos + Pedidos Únicos de TODOS os bots)
+        q_leads = db.query(Lead.user_id).all()
+        q_pedidos = db.query(Pedido.telegram_id).all()
+        
+        # Usa SET para contar usuários únicos globais
+        unique_members = set()
+        for r in q_leads:
+            if r[0]: unique_members.add(str(r[0]))
+        for r in q_pedidos:
+            if r[0]: unique_members.add(str(r[0]))
+            
+        total_members = len(unique_members)
+        
+        # C) Faturamento Total (Apenas Pagos/Aprovados)
+        status_ok = ['paid', 'approved', 'active', 'completed', 'succeeded']
+        revenue_query = db.query(func.sum(Pedido.valor)).filter(Pedido.status.in_(status_ok))
+        total_revenue = revenue_query.scalar() or 0.0
+        
+        # D) Total de Vendas (Quantidade)
+        total_sales = db.query(Pedido).filter(Pedido.status.in_(status_ok)).count()
+        
+        # 3. Lógica de Gamificação (Placas)
+        # Níveis: 100k (Prodígio), 500k (Empreendedor), 1M (Milionário), 10M (Magnata)
+        levels = [
+            {"name": "Prodígio", "target": 100000, "slug": "prodigio"},
+            {"name": "Empreendedor", "target": 500000, "slug": "empreendedor"},
+            {"name": "Milionário", "target": 1000000, "slug": "milionario"},
+            {"name": "Magnata", "target": 10000000, "slug": "magnata"}
+        ]
+        
+        current_level = None
+        next_level = levels[0]
+        
+        for lvl in levels:
+            if total_revenue >= lvl["target"]:
+                current_level = lvl
+            else:
+                next_level = lvl
+                break
+        
+        # Se passou do último nível
+        if total_revenue >= levels[-1]["target"]:
+            next_level = None 
+            
+        # Cálculo da porcentagem para a barra de progresso
+        if next_level:
+            # Ex: Faturou 20k, Meta 100k -> 20%
+            progress_pct = (total_revenue / next_level["target"]) * 100
+            progress_pct = min(progress_pct, 100)
+        else:
+            progress_pct = 100 # Zerou o jogo
+            
+        return {
+            "profile": {
+                "name": admin_name,
+                "avatar_url": admin_avatar
+            },
+            "stats": {
+                "total_bots": total_bots,
+                "total_members": total_members,
+                "total_revenue": total_revenue,
+                "total_sales": total_sales
+            },
+            "gamification": {
+                "current_level": current_level,
+                "next_level": next_level,
+                "progress_percentage": round(progress_pct, 2)
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Erro ao buscar perfil: {e}")
+        return {"error": str(e)}
+
+@app.post("/api/admin/profile")
+def update_profile(data: ProfileUpdate, db: Session = Depends(get_db)):
+    """
+    Atualiza Nome e Foto do Administrador
+    """
+    try:
+        # Atualiza ou Cria Nome
+        conf_name = db.query(SystemConfig).filter(SystemConfig.key == "admin_name").first()
+        if not conf_name:
+            conf_name = SystemConfig(key="admin_name")
+            db.add(conf_name)
+        conf_name.value = data.name
+        
+        # Atualiza ou Cria Avatar
+        conf_avatar = db.query(SystemConfig).filter(SystemConfig.key == "admin_avatar").first()
+        if not conf_avatar:
+            conf_avatar = SystemConfig(key="admin_avatar")
+            db.add(conf_avatar)
+        conf_avatar.value = data.avatar_url or ""
+        
+        db.commit()
+        return {"status": "success", "msg": "Perfil atualizado!"}
+        
+    except Exception as e:
+        logger.error(f"Erro ao atualizar perfil: {e}")
+        raise HTTPException(status_code=500, detail="Erro ao salvar perfil")
 
 @app.get("/")
 def home():
