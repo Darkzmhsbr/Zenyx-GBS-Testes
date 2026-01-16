@@ -27,6 +27,7 @@ import update_db
 from migration_v3 import executar_migracao_v3
 from migration_v4 import executar_migracao_v4
 from migration_v5 import executar_migracao_v5  # <--- ADICIONE ESTA LINHA
+from migration_v6 import executar_migracao_v6  # <--- ADICIONE AQUI
 
 # Configuração de Log
 logging.basicConfig(level=logging.INFO)
@@ -224,7 +225,8 @@ def on_startup():
     executar_migracao_v3()
     executar_migracao_v4()
     executar_migracao_v5()  # <--- ADICIONE ESTA LINHA
-    
+    executar_migracao_v6() # <--- ADICIONE AQUI
+
     # 2. FORÇA A CRIAÇÃO DE TODAS AS COLUNAS FALTANTES (TODAS AS VERSÕES)
     try:
         with engine.connect() as conn:
@@ -608,10 +610,32 @@ class OrderBumpCreate(BaseModel):
     nome_produto: str
     preco: float
     link_acesso: str
+    autodestruir: Optional[bool] = False  # <--- ADICIONE AQUI
     msg_texto: Optional[str] = None
     msg_media: Optional[str] = None
     btn_aceitar: Optional[str] = "✅ SIM, ADICIONAR"
     btn_recusar: Optional[str] = "❌ NÃO, OBRIGADO"
+
+class OrderBumpConfig(Base):
+    __tablename__ = "order_bump_config"
+    id = Column(Integer, primary_key=True, index=True)
+    bot_id = Column(Integer, ForeignKey("bots.id"), unique=True)
+    
+    ativo = Column(Boolean, default=False)
+    nome_produto = Column(String)
+    preco = Column(Float)
+    link_acesso = Column(String, nullable=True)
+    
+    # 🔥 NOVO CAMPO
+    autodestruir = Column(Boolean, default=False) 
+    
+    msg_texto = Column(Text, default="Gostaria de adicionar este item?")
+    msg_media = Column(String, nullable=True)
+    
+    btn_aceitar = Column(String, default="✅ SIM, ADICIONAR")
+    btn_recusar = Column(String, default="❌ NÃO, OBRIGADO")
+    
+    bot = relationship("Bot", back_populates="order_bump")
 
 class IntegrationUpdate(BaseModel):
     token: str
@@ -1034,6 +1058,7 @@ def save_order_bump(bot_id: int, dados: OrderBumpCreate, db: Session = Depends(g
     bump.nome_produto = dados.nome_produto
     bump.preco = dados.preco
     bump.link_acesso = dados.link_acesso
+    bump.autodestruir = dados.autodestruir  # <--- ADICIONE AQUI
     bump.msg_texto = dados.msg_texto
     bump.msg_media = dados.msg_media
     bump.btn_aceitar = dados.btn_aceitar
@@ -1988,6 +2013,8 @@ Copie o código abaixo para garantir sua vaga:
         # ============================================================
         elif update.callback_query and update.callback_query.data.startswith("bump_yes_"):
             chat_id = update.callback_query.message.chat.id
+            msg_id = update.callback_query.message.message_id # ID da mensagem da oferta
+            
             first_name = update.callback_query.from_user.first_name
             username = update.callback_query.from_user.username
             plano_id = update.callback_query.data.split("_")[2]
@@ -1999,6 +2026,11 @@ Copie o código abaixo para garantir sua vaga:
                 bot_temp.send_message(chat_id, "❌ Erro: Oferta não encontrada.")
                 return {"status": "error"}
             
+            # 🔥 LÓGICA DE AUTODESTRUIÇÃO
+            if bump.autodestruir:
+                try: bot_temp.delete_message(chat_id, msg_id)
+                except: pass
+
             # --- CÁLCULOS E NOMES DO COMBO ---
             preco_total = plano.preco_atual + bump.preco
             nome_combo = f"{plano.nome_exibicao} + {bump.nome_produto}"
@@ -2041,7 +2073,6 @@ Copie o código abaixo para garantir sua vaga:
                 try: bot_temp.delete_message(chat_id, msg_aguarde.message_id)
                 except: pass
                 
-                # --- MENSAGEM COMBO (PERSONALIZADA) ---
                 legenda_pix = f"""🌟 Seu pagamento foi gerado com sucesso:
 🎁 Plano: {nome_combo}
 💰 Valor: R$ {preco_total:.2f}
@@ -2063,12 +2094,21 @@ Copie o código abaixo para garantir sua vaga:
         # ============================================================
         elif update.callback_query and update.callback_query.data.startswith("bump_no_"):
             chat_id = update.callback_query.message.chat.id
+            msg_id = update.callback_query.message.message_id # ID da mensagem da oferta
+            
             first_name = update.callback_query.from_user.first_name
             username = update.callback_query.from_user.username
             plano_id = update.callback_query.data.split("_")[2]
             
             plano = db.query(PlanoConfig).filter(PlanoConfig.id == plano_id).first()
             if not plano: return {"status": "error"}
+            
+            # 🔥 LÓGICA DE AUTODESTRUIÇÃO
+            # Precisa buscar o config aqui também para saber se deleta
+            bump_config = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_db.id).first()
+            if bump_config and bump_config.autodestruir:
+                try: bot_temp.delete_message(chat_id, msg_id)
+                except: pass
             
             logger.info(f"📉 [BOT {bot_db.id}] Cliente RECUSOU Bump. Gerando apenas Plano: R$ {plano.preco_atual:.2f}")
             
@@ -2108,7 +2148,6 @@ Copie o código abaixo para garantir sua vaga:
                 try: bot_temp.delete_message(chat_id, msg_aguarde.message_id)
                 except: pass
                 
-                # --- MENSAGEM PADRÃO (SÓ O PLANO) ---
                 legenda_pix = f"""🌟 Seu pagamento foi gerado com sucesso:
 🎁 Plano: {plano.nome_exibicao}
 💰 Valor: R$ {plano.preco_atual:.2f}
