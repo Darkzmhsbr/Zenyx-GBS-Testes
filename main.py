@@ -731,7 +731,7 @@ def update_bot(bot_id: int, dados: BotCreate, db: Session = Depends(get_db)):
                 pass
 
             # D) Configura o Webhook no NOVO token
-            public_url = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-production.up.railway.app")
+            public_url = os.getenv("RAILWAY_PUBLIC_DOMAIN", "https://zenyx-gbs-testes-production.up.railway.app")
             # Remove https:// se vier duplicado da env var
             if public_url.startswith("https://"): public_url = public_url.replace("https://", "")
             
