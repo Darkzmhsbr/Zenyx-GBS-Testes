@@ -442,14 +442,38 @@ def gerar_pix_pushinpay(valor_float: float, transaction_id: str):
         return None
 
 # --- HELPER: Notificar Admin Principal ---
+# --- HELPER: Notificar TODOS os Admins (Principal + Extras) ---
 def notificar_admin_principal(bot_db: Bot, mensagem: str):
-    if not bot_db.admin_principal_id:
+    """
+    Envia notificação para o Admin Principal E para os Admins Extras configurados.
+    """
+    ids_unicos = set()
+
+    # 1. Adiciona Admin Principal (se houver)
+    if bot_db.admin_principal_id:
+        ids_unicos.add(str(bot_db.admin_principal_id).strip())
+
+    # 2. Adiciona Admins Extras (da tabela BotAdmin)
+    # O SQLAlchemy carrega 'admins' automaticamente se a sessão estiver ativa
+    if bot_db.admins:
+        for admin in bot_db.admins:
+            if admin.telegram_id:
+                ids_unicos.add(str(admin.telegram_id).strip())
+
+    if not ids_unicos:
         return
+
     try:
         sender = telebot.TeleBot(bot_db.token)
-        sender.send_message(bot_db.admin_principal_id, mensagem, parse_mode="Markdown")
+        # Loop para enviar para todos os IDs encontrados
+        for chat_id in ids_unicos:
+            try:
+                sender.send_message(chat_id, mensagem, parse_mode="Markdown")
+            except Exception as e_send:
+                logger.error(f"Erro ao notificar admin {chat_id}: {e_send}")
+                
     except Exception as e:
-        logger.error(f"Falha ao notificar admin principal {bot_db.admin_principal_id}: {e}")
+        logger.error(f"Falha geral na notificação: {e}")
 
 # --- ROTAS DE INTEGRAÇÃO (SALVAR TOKEN) ---
 # =========================================================
@@ -791,7 +815,7 @@ def deletar_bot(bot_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Erro interno ao excluir bot: {str(e)}")
 
 # =========================================================
-# 🛡️ GESTÃO DE ADMINISTRADORES (FASE 1)
+# 🛡️ GESTÃO DE ADMINISTRADORES (FASE 2 - COM EDIÇÃO)
 # =========================================================
 
 @app.get("/api/admin/bots/{bot_id}/admins")
@@ -826,6 +850,35 @@ def adicionar_admin(bot_id: int, dados: BotAdminCreate, db: Session = Depends(ge
     db.commit()
     db.refresh(novo_admin)
     return novo_admin
+
+# 🔥 [NOVO] Rota para Editar Admin Existente
+@app.put("/api/admin/bots/{bot_id}/admins/{admin_id}")
+def atualizar_admin(bot_id: int, admin_id: int, dados: BotAdminCreate, db: Session = Depends(get_db)):
+    """Atualiza o ID ou Nome de um administrador existente"""
+    admin_db = db.query(BotAdmin).filter(
+        BotAdmin.id == admin_id,
+        BotAdmin.bot_id == bot_id
+    ).first()
+    
+    if not admin_db:
+        raise HTTPException(status_code=404, detail="Administrador não encontrado")
+    
+    # Verifica duplicidade (se mudar o ID para um que já existe)
+    if dados.telegram_id != admin_db.telegram_id:
+        existente = db.query(BotAdmin).filter(
+            BotAdmin.bot_id == bot_id, 
+            BotAdmin.telegram_id == dados.telegram_id
+        ).first()
+        if existente:
+            raise HTTPException(status_code=400, detail="Este Telegram ID já está em uso.")
+
+    # Atualiza os dados
+    admin_db.telegram_id = dados.telegram_id
+    admin_db.nome = dados.nome
+    
+    db.commit()
+    db.refresh(admin_db)
+    return admin_db
 
 @app.delete("/api/admin/bots/{bot_id}/admins/{telegram_id}")
 def remover_admin(bot_id: int, telegram_id: str, db: Session = Depends(get_db)):
