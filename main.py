@@ -652,6 +652,18 @@ class OrderBumpCreate(BaseModel):
 class IntegrationUpdate(BaseModel):
     token: str
 
+# --- MODELOS TRACKING (Certifique-se de que estão no topo, junto com os outros Pydantic models) ---
+class TrackingFolderCreate(BaseModel):
+    nome: str
+    plataforma: str # 'facebook', 'instagram', etc
+
+class TrackingLinkCreate(BaseModel):
+    folder_id: int
+    bot_id: int
+    nome: str
+    origem: Optional[str] = "outros" 
+    codigo: Optional[str] = None
+
 # --- MODELO DE PERFIL ---
 class ProfileUpdate(BaseModel):
     name: str
@@ -1165,6 +1177,81 @@ def salvar_fluxo(bot_id: int, flow: FlowUpdate, db: Session = Depends(get_db)):
     
     db.commit()
     return {"status": "saved"}
+
+# =========================================================
+# 🔗 ROTAS DE TRACKING (RASTREAMENTO)
+# =========================================================
+
+@app.get("/api/admin/tracking/folders")
+def list_tracking_folders(db: Session = Depends(get_db)):
+    """Lista pastas com contagem de links"""
+    try:
+        folders = db.query(TrackingFolder).all()
+        result = []
+        for f in folders:
+            link_count = db.query(TrackingLink).filter(TrackingLink.folder_id == f.id).count()
+            result.append({
+                "id": f.id, "nome": f.nome, "plataforma": f.plataforma, 
+                "link_count": link_count, "created_at": f.created_at
+            })
+        return result
+    except Exception as e:
+        logger.error(f"Erro ao listar pastas: {e}")
+        return []
+
+@app.post("/api/admin/tracking/folders")
+def create_tracking_folder(dados: TrackingFolderCreate, db: Session = Depends(get_db)):
+    try:
+        nova_pasta = TrackingFolder(nome=dados.nome, plataforma=dados.plataforma)
+        db.add(nova_pasta)
+        db.commit()
+        db.refresh(nova_pasta)
+        return {"status": "ok", "id": nova_pasta.id}
+    except Exception as e:
+        logger.error(f"Erro ao criar pasta: {e}")
+        raise HTTPException(status_code=500, detail="Erro interno ao criar pasta")
+
+@app.get("/api/admin/tracking/links/{folder_id}")
+def list_tracking_links(folder_id: int, db: Session = Depends(get_db)):
+    return db.query(TrackingLink).filter(TrackingLink.folder_id == folder_id).all()
+
+@app.post("/api/admin/tracking/links")
+def create_tracking_link(dados: TrackingLinkCreate, db: Session = Depends(get_db)):
+    # Gera código aleatório se não informado
+    if not dados.codigo:
+        import random, string
+        chars = string.ascii_lowercase + string.digits
+        dados.codigo = ''.join(random.choice(chars) for _ in range(8))
+    
+    # Verifica duplicidade
+    exists = db.query(TrackingLink).filter(TrackingLink.codigo == dados.codigo).first()
+    if exists:
+        raise HTTPException(400, "Este código de rastreamento já existe.")
+        
+    novo_link = TrackingLink(
+        folder_id=dados.folder_id,
+        bot_id=dados.bot_id,
+        nome=dados.nome,
+        codigo=dados.codigo,
+        origem=dados.origem
+    )
+    db.add(novo_link)
+    db.commit()
+    return {"status": "ok", "link": novo_link}
+
+@app.delete("/api/admin/tracking/folders/{fid}")
+def delete_folder(fid: int, db: Session = Depends(get_db)):
+    # Apaga links dentro da pasta primeiro
+    db.query(TrackingLink).filter(TrackingLink.folder_id == fid).delete()
+    db.query(TrackingFolder).filter(TrackingFolder.id == fid).delete()
+    db.commit()
+    return {"status": "deleted"}
+
+@app.delete("/api/admin/tracking/links/{lid}")
+def delete_link(lid: int, db: Session = Depends(get_db)):
+    db.query(TrackingLink).filter(TrackingLink.id == lid).delete()
+    db.commit()
+    return {"status": "deleted"}
 
 # =========================================================
 # 🧩 ROTAS DE PASSOS DINÂMICOS (FLOW V2)
