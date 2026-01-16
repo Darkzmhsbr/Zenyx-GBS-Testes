@@ -939,17 +939,13 @@ def remover_admin(bot_id: int, telegram_id: str, db: Session = Depends(get_db)):
 @app.get("/api/admin/bots")
 def listar_bots(db: Session = Depends(get_db)):
     """
-    🔥 [CORRIGIDO] Lista todos os bots com estatísticas corretas
-    
-    CORREÇÕES:
-    - Leads: Conta LEADS + PEDIDOS SEM DUPLICATAS
-    - Revenue: Soma pedidos PAGOS + EXPIRADOS (Dinheiro que entrou)
+    🔥 [CORRIGIDO] Lista bots + Revenue (Pagos/Expirados) + Suporte Username
     """
     bots = db.query(Bot).all()
     
     result = []
     for bot in bots:
-        # 1. CONTAGEM DE LEADS ÚNICOS (MANTIDO)
+        # 1. CONTAGEM DE LEADS ÚNICOS
         leads_ids = set()
         leads_query = db.query(Lead.user_id).filter(Lead.bot_id == bot.id).all()
         for lead in leads_query:
@@ -963,15 +959,11 @@ def listar_bots(db: Session = Depends(get_db)):
         contatos_unicos = leads_ids.union(pedidos_ids)
         leads_count = len(contatos_unicos)
         
-        # ============================================================
-        # 💰 [CORRIGIDO] Revenue: Inclui 'expired' na conta!
-        # ============================================================
-        # Lista de status que consideram dinheiro no bolso
+        # 2. REVENUE (PAGOS + EXPIRADOS)
         status_financeiro = ["approved", "paid", "active", "completed", "succeeded", "expired"]
-        
         vendas_aprovadas = db.query(Pedido).filter(
             Pedido.bot_id == bot.id,
-            Pedido.status.in_(status_financeiro) # 🔥 AGORA CONTA EXPIRADOS
+            Pedido.status.in_(status_financeiro)
         ).all()
         
         revenue = sum([v.valor for v in vendas_aprovadas]) if vendas_aprovadas else 0.0
@@ -983,6 +975,7 @@ def listar_bots(db: Session = Depends(get_db)):
             "username": bot.username or None,
             "id_canal_vip": bot.id_canal_vip,
             "admin_principal_id": bot.admin_principal_id,
+            "suporte_username": bot.suporte_username, # 🔥 AQUI: Retorna o campo para o Front
             "status": bot.status,
             "leads": leads_count,
             "revenue": revenue,
@@ -990,7 +983,6 @@ def listar_bots(db: Session = Depends(get_db)):
         })
     
     return result
-
 
 # ===========================
 # 💎 PLANOS & FLUXO
