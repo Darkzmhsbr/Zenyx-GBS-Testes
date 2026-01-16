@@ -26,6 +26,7 @@ import update_db
 
 from migration_v3 import executar_migracao_v3
 from migration_v4 import executar_migracao_v4
+from migration_v5 import executar_migracao_v5  # <--- ADICIONE ESTA LINHA
 
 # Configuração de Log
 logging.basicConfig(level=logging.INFO)
@@ -222,6 +223,7 @@ def on_startup():
     init_db()
     executar_migracao_v3()
     executar_migracao_v4()
+    executar_migracao_v5()  # <--- ADICIONE ESTA LINHA
     
     # 2. FORÇA A CRIAÇÃO DE TODAS AS COLUNAS FALTANTES (TODAS AS VERSÕES)
     try:
