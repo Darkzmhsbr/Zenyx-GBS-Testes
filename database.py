@@ -50,6 +50,10 @@ class Bot(Base):
     username = Column(String, nullable=True)
     id_canal_vip = Column(String)
     admin_principal_id = Column(String, nullable=True)
+    
+    # 🔥 [NOVO] Username do Suporte
+    suporte_username = Column(String, nullable=True)
+    
     status = Column(String, default="ativo")
     created_at = Column(DateTime, default=datetime.utcnow)
     
@@ -64,7 +68,7 @@ class Bot(Base):
     leads = relationship("Lead", backref="bot_ref", cascade="all, delete-orphan")
     campanhas = relationship("RemarketingCampaign", backref="bot_ref", cascade="all, delete-orphan")
     
-    # 🔥 [NOVO FASE 1] Relacionamento com Order Bump
+    # Relacionamento com Order Bump
     order_bump = relationship("OrderBumpConfig", uselist=False, back_populates="bot", cascade="all, delete-orphan")
 
 class BotAdmin(Base):
@@ -89,7 +93,6 @@ class OrderBumpConfig(Base):
     preco = Column(Float)         # Valor a ser somado
     link_acesso = Column(String, nullable=True) # Link do canal/grupo extra
 
-    # 🔥 O CAMPO NOVO FICA AQUI
     autodestruir = Column(Boolean, default=False)
     
     # Conteúdo da Oferta
@@ -169,7 +172,7 @@ class BotFlow(Base):
     mostrar_planos_2 = Column(Boolean, default=True)
 
 # =========================================================
-# 🧩 [ATUALIZADO V4] TABELA DE PASSOS INTERMEDIÁRIOS
+# 🧩 TABELA DE PASSOS INTERMEDIÁRIOS
 # =========================================================
 class BotFlowStep(Base):
     __tablename__ = "bot_flow_steps"
@@ -191,7 +194,7 @@ class BotFlowStep(Base):
     bot = relationship("Bot", back_populates="steps")
 
 # =========================================================
-# 🛒 PEDIDOS (ATUALIZADO COM CAMPOS DE FUNIL E ORDER BUMP)
+# 🛒 PEDIDOS
 # =========================================================
 class Pedido(Base):
     __tablename__ = "pedidos"
@@ -220,7 +223,7 @@ class Pedido(Base):
     
     created_at = Column(DateTime, default=datetime.utcnow)
     
-    # 🔥 [NOVO FASE 1] Campo para identificar se comprou o Order Bump
+    # Campo para identificar se comprou o Order Bump
     tem_order_bump = Column(Boolean, default=False)
     
     # ============================================================

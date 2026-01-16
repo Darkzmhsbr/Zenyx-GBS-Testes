@@ -280,7 +280,10 @@ def on_startup():
                     btn_texto VARCHAR DEFAULT 'Próximo ▶️',
                     created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT now()
                 );
-                """
+                """,
+                
+                # --- [CORREÇÃO 6] SUPORTE NO BOT (MENU) ---
+                "ALTER TABLE bots ADD COLUMN IF NOT EXISTS suporte_username VARCHAR;"
             ]
             
             for cmd in comandos_sql:
@@ -532,7 +535,8 @@ class BotCreate(BaseModel):
     nome: str
     token: str
     id_canal_vip: str
-    admin_principal_id: Optional[str] = None  # Campo opcional
+    admin_principal_id: Optional[str] = None
+    suporte_username: Optional[str] = None # 🔥 NOVO CAMPO
 
 # Novo modelo para Atualização
 class BotUpdate(BaseModel):
@@ -540,6 +544,7 @@ class BotUpdate(BaseModel):
     token: Optional[str] = None
     id_canal_vip: Optional[str] = None
     admin_principal_id: Optional[str] = None
+    suporte_username: Optional[str] = None # 🔥 NOVO CAMPO
 
 # Modelo para Criar Admin
 class BotAdminCreate(BaseModel):
@@ -660,6 +665,21 @@ class UserUpdate(BaseModel):
     status: Optional[str] = None
     custom_expiration: Optional[str] = None # 'vitalicio', 'remover' ou data YYYY-MM-DD
 
+# =========================================================
+# ⚙️ HELPER: CONFIGURAR MENU (COMANDOS)
+# =========================================================
+def configurar_menu_bot(token):
+    try:
+        tb = telebot.TeleBot(token)
+        tb.set_my_commands([
+            telebot.types.BotCommand("start", "🚀 Iniciar"),
+            telebot.types.BotCommand("suporte", "💬 Falar com Suporte"),
+            telebot.types.BotCommand("status", "⭐ Minha Assinatura")
+        ])
+        logger.info(f"✅ Menu de comandos configurado para o token {token[:10]}...")
+    except Exception as e:
+        logger.error(f"❌ Erro ao configurar menu: {e}")
+
 # ===========================
 # ⚙️ GESTÃO DE BOTS
 # ===========================
@@ -671,8 +691,6 @@ def criar_bot(bot_data: BotCreate, db: Session = Depends(get_db)):
 
     try:
         tb = telebot.TeleBot(bot_data.token)
-        
-        # [NOVO] Busca informações do bot do Telegram
         bot_info = tb.get_me()
         username = bot_info.username if hasattr(bot_info, 'username') else None
         
@@ -682,6 +700,9 @@ def criar_bot(bot_data: BotCreate, db: Session = Depends(get_db)):
             webhook_url = f"https://{public_url}/webhook/{bot_data.token}"
             tb.set_webhook(url=webhook_url)
         
+        # 🔥 CONFIGURA MENU
+        configurar_menu_bot(bot_data.token)
+        
         status = "ativo"
     except Exception as e:
         logger.error(f"Erro ao criar bot: {e}")
@@ -690,16 +711,16 @@ def criar_bot(bot_data: BotCreate, db: Session = Depends(get_db)):
     novo_bot = Bot(
         nome=bot_data.nome,
         token=bot_data.token,
-        username=username,  # [CORRIGIDO] Salva o username do Telegram
+        username=username,
         id_canal_vip=bot_data.id_canal_vip,
         status=status,
-        admin_principal_id=bot_data.admin_principal_id
+        admin_principal_id=bot_data.admin_principal_id,
+        suporte_username=bot_data.suporte_username # 🔥 SALVA
     )
     db.add(novo_bot)
     db.commit()
     db.refresh(novo_bot)
     
-    # [NOVO] Retorna com username incluído
     return {
         "id": novo_bot.id,
         "nome": novo_bot.nome,
@@ -714,63 +735,49 @@ def criar_bot(bot_data: BotCreate, db: Session = Depends(get_db)):
     }
 
 @app.put("/api/admin/bots/{bot_id}")
-def update_bot(bot_id: int, dados: BotCreate, db: Session = Depends(get_db)):
+def update_bot(bot_id: int, dados: BotUpdate, db: Session = Depends(get_db)):
     bot_db = db.query(Bot).filter(Bot.id == bot_id).first()
     if not bot_db: raise HTTPException(404, "Bot não encontrado")
     
-    # Guarda token antigo para verificar mudança
     old_token = bot_db.token
 
-    # 1. Atualiza campos administrativos básicos (Canal e Admin)
-    if dados.id_canal_vip: 
-        bot_db.id_canal_vip = dados.id_canal_vip
+    # 1. Atualiza campos administrativos
+    if dados.id_canal_vip: bot_db.id_canal_vip = dados.id_canal_vip
+    if dados.admin_principal_id is not None: bot_db.admin_principal_id = dados.admin_principal_id
+    if dados.suporte_username is not None: bot_db.suporte_username = dados.suporte_username # 🔥 ATUALIZA
     
-    if dados.admin_principal_id is not None: 
-        bot_db.admin_principal_id = dados.admin_principal_id
-    
-    # 2. LÓGICA DE TROCA DE TOKEN (COM AUTO-ATUALIZAÇÃO DE NOME E USERNAME)
+    # 2. LÓGICA DE TROCA DE TOKEN
     if dados.token and dados.token != old_token:
         try:
             logger.info(f"🔄 Detectada troca de token para o bot ID {bot_id}...")
-            
-            # A) Conecta com o NOVO token para validar e pegar dados reais
             new_tb = telebot.TeleBot(dados.token)
-            bot_info = new_tb.get_me() # <--- A MÁGICA ACONTECE AQUI
+            bot_info = new_tb.get_me()
             
-            # B) Atualiza Token, Nome e Username baseados no Telegram
             bot_db.token = dados.token
-            bot_db.nome = bot_info.first_name # Atualiza o nome automaticamente
-            bot_db.username = bot_info.username # Atualiza o @ automaticamente
+            bot_db.nome = bot_info.first_name
+            bot_db.username = bot_info.username
             
-            logger.info(f"✅ Dados atualizados via Telegram: {bot_db.nome} (@{bot_db.username})")
-
-            # C) Remove o Webhook do token ANTIGO (Limpeza)
             try:
                 old_tb = telebot.TeleBot(old_token)
                 old_tb.delete_webhook()
-            except: 
-                pass
+            except: pass
 
-            # D) Configura o Webhook no NOVO token
             public_url = os.getenv("RAILWAY_PUBLIC_DOMAIN", "https://zenyx-gbs-testes-production.up.railway.app")
-            # Remove https:// se vier duplicado da env var
             if public_url.startswith("https://"): public_url = public_url.replace("https://", "")
             
             webhook_url = f"https://{public_url}/webhook/{dados.token}"
             new_tb.set_webhook(url=webhook_url)
             
-            logger.info(f"♻️ Webhook atualizado com sucesso para: {webhook_url}")
-            bot_db.status = "ativo" # Reseta para ativo ao trocar token
+            bot_db.status = "ativo"
             
         except Exception as e:
-            logger.error(f"❌ Erro ao validar novo token: {e}")
-            # Se o token for inválido, não salvamos a troca para não quebrar o bot
-            raise HTTPException(status_code=400, detail=f"Token inválido ou erro de conexão com Telegram: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"Token inválido: {str(e)}")
             
     else:
-        # Se NÃO trocou o token, permite atualizar o nome manualmente pelo input
-        if dados.nome: 
-            bot_db.nome = dados.nome
+        if dados.nome: bot_db.nome = dados.nome
+    
+    # 🔥 ATUALIZA O MENU SEMPRE QUE SALVAR
+    configurar_menu_bot(bot_db.token)
     
     db.commit()
     db.refresh(bot_db)
@@ -1448,30 +1455,27 @@ def enviar_passo_automatico(bot_temp, chat_id, passo_atual, bot_db, db):
 
     except Exception as e:
         logger.error(f"Erro no passo automático {passo_atual.step_order}: {e}")
-# =========================================================
-# 🚀 WEBHOOK GERAL (PORTEIRO + ORDER BUMP + FLUXO + HTML + PROMO FULL)
-# =========================================================
+
 # =========================================================
 # 🚀 WEBHOOK GERAL (PORTEIRO + BUMP + HTML + BTN CHECK STATUS)
+# =========================================================
+# =========================================================
+# 🚀 WEBHOOK GERAL (PORTEIRO + BUMP + HTML + MENUS)
 # =========================================================
 @app.post("/webhook/{token}")
 async def receber_update_telegram(token: str, req: Request, db: Session = Depends(get_db)):
     
-    # 1. Proteção contra Loop do PIX
     if token == "pix": return {"status": "ignored"}
     
-    # 2. Verifica se o Bot existe e está ativo
     bot_db = db.query(Bot).filter(Bot.token == token).first()
     if not bot_db or bot_db.status == "pausado": 
         return {"status": "ignored"}
 
     try:
-        # Lê o update do Telegram
         body = await req.json()
         update = telebot.types.Update.de_json(body)
         bot_temp = telebot.TeleBot(token)
         
-        # Define message com segurança
         message = update.message if update.message else None
         
         # ============================================================
@@ -1485,7 +1489,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 for member in message.new_chat_members:
                     if member.is_bot: continue
                     
-                    # Busca pedido pago
                     pedido = db.query(Pedido).filter(
                         Pedido.bot_id == bot_db.id,
                         Pedido.telegram_id == str(member.id),
@@ -1520,63 +1523,95 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
             return {"status": "checked"}
 
         # ============================================================
-        # 👋 2. COMANDO /START
+        # 👋 2. COMANDOS (/start, /suporte, /status)
         # ============================================================
-        if message and message.text and (message.text == "/start" or message.text.startswith("/start ")):
+        if message and message.text:
             chat_id = message.chat.id
-            first_name = message.from_user.first_name
-            username = message.from_user.username
+            txt = message.text.lower().strip()
             
-            # --- SALVA LEAD ---
-            try:
-                lead = db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first()
-                if not lead:
-                    lead = Lead(user_id=str(chat_id), nome=first_name, username=username, bot_id=bot_db.id, status="topo", funil_stage="lead_frio", created_at=datetime.utcnow())
-                    db.add(lead)
+            # --- COMANDO /SUPORTE ---
+            if txt == "/suporte":
+                if bot_db.suporte_username:
+                    # Remove @ se o usuário tiver colocado, para padronizar
+                    sup = bot_db.suporte_username.replace("@", "")
+                    bot_temp.send_message(chat_id, f"💬 <b>Falar com Suporte:</b>\n\n👉 @{sup}", parse_mode="HTML")
                 else:
-                    lead.nome = first_name
-                    lead.username = username
-                    lead.ultimo_contato = datetime.utcnow()
-                db.commit()
-            except: pass
+                    bot_temp.send_message(chat_id, "⚠️ Nenhum suporte definido para este bot.")
+                return {"status": "ok"}
 
-            # --- CARREGA FLUXO ---
-            fluxo = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
-            msg_texto = fluxo.msg_boas_vindas if fluxo else "Olá! Seja bem-vindo."
-            msg_media = fluxo.media_url if fluxo else None
-            mostrar_planos_1 = fluxo.mostrar_planos_1 if fluxo else False
+            # --- COMANDO /STATUS ---
+            if txt == "/status":
+                pedido = db.query(Pedido).filter(
+                    Pedido.bot_id == bot_db.id,
+                    Pedido.telegram_id == str(chat_id),
+                    Pedido.status.in_(['paid', 'approved'])
+                ).order_by(desc(Pedido.created_at)).first()
+                
+                if pedido:
+                    validade = "VITALÍCIO ♾️"
+                    if pedido.data_expiracao:
+                        if datetime.utcnow() > pedido.data_expiracao:
+                            bot_temp.send_message(chat_id, "❌ <b>Sua assinatura expirou!</b>\nDigite /start para renovar.", parse_mode="HTML")
+                            return {"status": "ok"}
+                        validade = pedido.data_expiracao.strftime("%d/%m/%Y")
+                    
+                    bot_temp.send_message(chat_id, f"✅ <b>Assinatura Ativa!</b>\n\n💎 Plano: {pedido.plano_nome}\n📅 Vence em: {validade}", parse_mode="HTML")
+                else:
+                    bot_temp.send_message(chat_id, "❌ <b>Nenhuma assinatura ativa encontrada.</b>\nDigite /start para ver os planos.", parse_mode="HTML")
+                return {"status": "ok"}
 
-            markup = types.InlineKeyboardMarkup()
-            
-            if mostrar_planos_1:
-                planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_db.id).all()
-                for p in planos:
-                    markup.add(types.InlineKeyboardButton(f"💎 {p.nome_exibicao} - R$ {p.preco_atual:.2f}", callback_data=f"checkout_{p.id}"))
-            else:
-                btn_txt = fluxo.btn_text_1 if (fluxo and fluxo.btn_text_1) else "🔓 VER CONTEÚDO"
-                markup.add(types.InlineKeyboardButton(btn_txt, callback_data="step_1"))
-
-            # Envia (HTML)
-            try:
-                if msg_media:
-                    if msg_media.lower().endswith(('.mp4', '.mov')):
-                        bot_temp.send_video(chat_id, msg_media, caption=msg_texto, reply_markup=markup, parse_mode="HTML")
+            # --- COMANDO /START ---
+            if txt == "/start" or txt.startswith("/start "):
+                first_name = message.from_user.first_name
+                username = message.from_user.username
+                
+                # Salva Lead
+                try:
+                    lead = db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first()
+                    if not lead:
+                        lead = Lead(user_id=str(chat_id), nome=first_name, username=username, bot_id=bot_db.id, status="topo", funil_stage="lead_frio", created_at=datetime.utcnow())
+                        db.add(lead)
                     else:
-                        bot_temp.send_photo(chat_id, msg_media, caption=msg_texto, reply_markup=markup, parse_mode="HTML")
-                else:
-                    bot_temp.send_message(chat_id, msg_texto, reply_markup=markup, parse_mode="HTML")
-            except:
-                bot_temp.send_message(chat_id, msg_texto, reply_markup=markup) 
+                        lead.nome = first_name
+                        lead.username = username
+                        lead.ultimo_contato = datetime.utcnow()
+                    db.commit()
+                except: pass
 
-            return {"status": "ok"}
+                # Fluxo
+                fluxo = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
+                msg_texto = fluxo.msg_boas_vindas if fluxo else "Olá! Seja bem-vindo."
+                msg_media = fluxo.media_url if fluxo else None
+                mostrar_planos_1 = fluxo.mostrar_planos_1 if fluxo else False
+
+                markup = types.InlineKeyboardMarkup()
+                
+                if mostrar_planos_1:
+                    planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_db.id).all()
+                    for p in planos:
+                        markup.add(types.InlineKeyboardButton(f"💎 {p.nome_exibicao} - R$ {p.preco_atual:.2f}", callback_data=f"checkout_{p.id}"))
+                else:
+                    btn_txt = fluxo.btn_text_1 if (fluxo and fluxo.btn_text_1) else "🔓 VER CONTEÚDO"
+                    markup.add(types.InlineKeyboardButton(btn_txt, callback_data="step_1"))
+
+                try:
+                    if msg_media:
+                        if msg_media.lower().endswith(('.mp4', '.mov')):
+                            bot_temp.send_video(chat_id, msg_media, caption=msg_texto, reply_markup=markup, parse_mode="HTML")
+                        else:
+                            bot_temp.send_photo(chat_id, msg_media, caption=msg_texto, reply_markup=markup, parse_mode="HTML")
+                    else:
+                        bot_temp.send_message(chat_id, msg_texto, reply_markup=markup, parse_mode="HTML")
+                except:
+                    bot_temp.send_message(chat_id, msg_texto, reply_markup=markup)
+
+                return {"status": "ok"}
 
         # ============================================================
         # 🎮 3. CALLBACKS (BOTÕES)
         # ============================================================
         elif update.callback_query:
-            # Resposta rápida para não ficar carregando
             try: 
-                # Apenas responde se NÃO for o botão de checagem (ele tem alert específico)
                 if not update.callback_query.data.startswith("check_payment_"):
                     bot_temp.answer_callback_query(update.callback_query.id)
             except: pass
@@ -1592,13 +1627,11 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 except: current_step = 1
                 
                 steps = db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_db.id).order_by(BotFlowStep.step_order).all()
-                
                 target_step = None
                 is_last = False
-                if current_step <= len(steps):
-                    target_step = steps[current_step - 1]
-                else:
-                    is_last = True
+                
+                if current_step <= len(steps): target_step = steps[current_step - 1]
+                else: is_last = True
 
                 if target_step and not is_last:
                     mk = types.InlineKeyboardMarkup()
@@ -1617,7 +1650,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     except:
                         sent_msg = bot_temp.send_message(chat_id, target_step.msg_texto or "...", reply_markup=mk)
 
-                    # Delay Automático
                     if not target_step.mostrar_botao and target_step.delay_seconds > 0:
                         time.sleep(target_step.delay_seconds)
                         if target_step.autodestruir and sent_msg:
@@ -1625,14 +1657,12 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             except: pass
                         
                         prox = db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_db.id, BotFlowStep.step_order == target_step.step_order + 1).first()
-                        if prox:
-                            enviar_passo_automatico(bot_temp, chat_id, prox, bot_db, db)
-                        else:
-                            enviar_oferta_final(bot_temp, chat_id, bot_db.fluxo, bot_db.id, db)
+                        if prox: enviar_passo_automatico(bot_temp, chat_id, prox, bot_db, db)
+                        else: enviar_oferta_final(bot_temp, chat_id, bot_db.fluxo, bot_db.id, db)
                 else:
                     enviar_oferta_final(bot_temp, chat_id, bot_db.fluxo, bot_db.id, db)
 
-            # --- B) CHECKOUT (COM BOTÃO VERIFICAR) ---
+            # --- B) CHECKOUT ---
             elif data.startswith("checkout_"):
                 plano_id = data.split("_")[1]
                 plano = db.query(PlanoConfig).filter(PlanoConfig.id == plano_id).first()
@@ -1641,7 +1671,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 bump = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_db.id, OrderBumpConfig.ativo == True).first()
                 
                 if bump:
-                    # Manda Order Bump
                     mk = types.InlineKeyboardMarkup()
                     mk.row(
                         types.InlineKeyboardButton(f"{bump.btn_aceitar} (+ R$ {bump.preco:.2f})", callback_data=f"bump_yes_{plano.id}"),
@@ -1659,7 +1688,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     except:
                         bot_temp.send_message(chat_id, txt_bump, reply_markup=mk, parse_mode="HTML")
                 else:
-                    # Gera PIX direto
+                    # PIX DIRETO
                     msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando <b>PIX</b>...", parse_mode="HTML")
                     mytx = str(uuid.uuid4())
                     pix = gerar_pix_pushinpay(plano.preco_atual, mytx)
@@ -1679,7 +1708,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         try: bot_temp.delete_message(chat_id, msg_wait.message_id)
                         except: pass
                         
-                        # 🔥 BOTÃO DE VERIFICAÇÃO ADICIONADO
                         markup_pix = types.InlineKeyboardMarkup()
                         markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS DO PAGAMENTO", callback_data=f"check_payment_{txid}"))
 
@@ -1697,7 +1725,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     else:
                         bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
 
-            # --- C) BUMP YES/NO (COM BOTÃO VERIFICAR) ---
+            # --- C) BUMP YES/NO ---
             elif data.startswith("bump_yes_") or data.startswith("bump_no_"):
                 aceitou = "yes" in data
                 pid = data.split("_")[2]
@@ -1733,7 +1761,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     try: bot_temp.delete_message(chat_id, msg_wait.message_id)
                     except: pass
                     
-                    # 🔥 BOTÃO DE VERIFICAÇÃO ADICIONADO
                     markup_pix = types.InlineKeyboardMarkup()
                     markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS DO PAGAMENTO", callback_data=f"check_payment_{txid}"))
 
@@ -1749,12 +1776,10 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
 
                     bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
 
-            # --- D) PROMOÇÕES DE REMARKETING (COM BOTÃO VERIFICAR) ---
+            # --- D) PROMO ---
             elif data.startswith("promo_"):
                 try: campanha_uuid = data.split("_")[1]
                 except: campanha_uuid = ""
-                
-                logger.info(f"🔍 [WEBHOOK] Promo ativada: {campanha_uuid} por {chat_id}")
                 
                 campanha = db.query(RemarketingCampaign).filter(RemarketingCampaign.campaign_id == campanha_uuid).first()
                 
@@ -1768,7 +1793,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     plano = db.query(PlanoConfig).filter(PlanoConfig.id == campanha.plano_id).first()
                     if plano:
                         preco_final = campanha.promo_price if campanha.promo_price else plano.preco_atual
-                        
                         msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando <b>OFERTA ESPECIAL</b>...", parse_mode="HTML")
                         mytx = str(uuid.uuid4())
                         pix = gerar_pix_pushinpay(preco_final, mytx)
@@ -1788,7 +1812,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             try: bot_temp.delete_message(chat_id, msg_wait.message_id)
                             except: pass
                             
-                            # 🔥 BOTÃO DE VERIFICAÇÃO ADICIONADO
                             markup_pix = types.InlineKeyboardMarkup()
                             markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS DO PAGAMENTO", callback_data=f"check_payment_{txid}"))
 
@@ -1804,30 +1827,22 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
 
                             bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
                         else:
-                            bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX da oferta.")
+                            bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
                     else:
-                        bot_temp.send_message(chat_id, "❌ Plano da oferta não encontrado.")
+                        bot_temp.send_message(chat_id, "❌ Plano não encontrado.")
 
-            # --- E) VERIFICAR STATUS DO PAGAMENTO (NOVA FUNCIONALIDADE) ---
+            # --- E) VERIFICAR STATUS ---
             elif data.startswith("check_payment_"):
                 tx_id = data.split("_")[2]
-                
-                # Busca o pedido no banco
                 pedido = db.query(Pedido).filter(Pedido.transaction_id == tx_id).first()
                 
                 if not pedido:
                     bot_temp.answer_callback_query(update.callback_query.id, "❌ Pedido não encontrado.", show_alert=True)
-                
                 elif pedido.status in ['paid', 'approved', 'active']:
-                    # Se já está pago
                     bot_temp.answer_callback_query(update.callback_query.id, "✅ Pagamento Aprovado!", show_alert=False)
-                    
-                    # Se por algum motivo o link não foi enviado, avisa para olhar o chat
                     bot_temp.send_message(chat_id, "✅ <b>O pagamento foi confirmado!</b>\nVerifique se você recebeu o link de acesso nas mensagens anteriores.", parse_mode="HTML")
-                
                 else:
-                    # Ainda pendente
-                    bot_temp.answer_callback_query(update.callback_query.id, "⏳ O pagamento ainda não foi identificado. Aguarde alguns instantes e tente novamente.", show_alert=True)
+                    bot_temp.answer_callback_query(update.callback_query.id, "⏳ Pagamento não identificado ainda. Tente novamente.", show_alert=True)
 
     except Exception as e:
         logger.error(f"Erro no webhook: {e}")
