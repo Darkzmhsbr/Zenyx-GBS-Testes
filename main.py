@@ -345,7 +345,19 @@ def on_startup():
                     content_json TEXT
                 );
                 """
+                """,
+                """
+                # --- [CORREÇÃO 9] NOVAS COLUNAS PARA CATEGORIA RICA (BASEADO NO PDF) ---
+                "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS bg_color VARCHAR DEFAULT '#000000';",
+                "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS banner_desk_url VARCHAR;",
+                "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS video_preview_url VARCHAR;",
+                "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS model_img_url VARCHAR;",
+                "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS model_name VARCHAR;",
+                "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS model_desc TEXT;",
+                "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS footer_banner_url VARCHAR;",
+                "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS deco_lines_url VARCHAR;",
             ]
+            
             
             for cmd in comandos_sql:
                 try:
@@ -719,17 +731,29 @@ class MiniAppConfigUpdate(BaseModel):
     footer_text: Optional[str] = None
 
 # Modelo Pydantic para criar/editar Categoria
-class CategoryCreate(BaseModel):
-    id: Optional[int] = None # <--- CRUCIAL: Permite receber o ID para edição
-    bot_id: int
-    title: str
-    description: Optional[str] = None
-    cover_image: Optional[str] = None
-    banner_mob_url: Optional[str] = None
-    theme_color: Optional[str] = "#c333ff"
-    is_direct_checkout: bool = False
-    is_hacker_mode: bool = False
-    content_json: Optional[str] = "[]"
+class MiniAppCategory(Base):
+    __tablename__ = "miniapp_categories"
+    id = Column(Integer, primary_key=True, index=True)
+    bot_id = Column(Integer, ForeignKey("bots.id"))
+    slug = Column(String)
+    title = Column(String)
+    description = Column(String)
+    cover_image = Column(String) # cardImg
+    banner_mob_url = Column(String)
+    # --- NOVOS CAMPOS ---
+    bg_color = Column(String, default="#000000")
+    banner_desk_url = Column(String)
+    video_preview_url = Column(String)
+    model_img_url = Column(String)
+    model_name = Column(String)
+    model_desc = Column(String)
+    footer_banner_url = Column(String)
+    deco_lines_url = Column(String)
+    # --------------------
+    theme_color = Column(String, default="#c333ff")
+    is_direct_checkout = Column(Boolean, default=False)
+    is_hacker_mode = Column(Boolean, default=False)
+    content_json = Column(Text)
     
     # Flags Especiais
     is_direct_checkout: bool = False
@@ -1735,7 +1759,7 @@ def create_or_update_category(data: CategoryCreate, db: Session = Depends(get_db
             if not categoria:
                 raise HTTPException(status_code=404, detail="Categoria não encontrada para edição")
             
-            # Atualiza os campos
+            # Atualiza os campos BÁSICOS
             categoria.title = data.title
             categoria.description = data.description
             categoria.cover_image = data.cover_image
@@ -1744,6 +1768,16 @@ def create_or_update_category(data: CategoryCreate, db: Session = Depends(get_db
             categoria.is_direct_checkout = data.is_direct_checkout
             categoria.is_hacker_mode = data.is_hacker_mode
             categoria.content_json = data.content_json
+            
+            # Atualiza os campos NOVOS (VISUAL RICO)
+            categoria.bg_color = data.bg_color
+            categoria.banner_desk_url = data.banner_desk_url
+            categoria.video_preview_url = data.video_preview_url
+            categoria.model_img_url = data.model_img_url
+            categoria.model_name = data.model_name
+            categoria.model_desc = data.model_desc
+            categoria.footer_banner_url = data.footer_banner_url
+            categoria.deco_lines_url = data.deco_lines_url
             
             db.commit()
             db.refresh(categoria)
@@ -1761,7 +1795,16 @@ def create_or_update_category(data: CategoryCreate, db: Session = Depends(get_db
                 theme_color=data.theme_color,
                 is_direct_checkout=data.is_direct_checkout,
                 is_hacker_mode=data.is_hacker_mode,
-                content_json=data.content_json
+                content_json=data.content_json,
+                # NOVOS CAMPOS
+                bg_color=data.bg_color,
+                banner_desk_url=data.banner_desk_url,
+                video_preview_url=data.video_preview_url,
+                model_img_url=data.model_img_url,
+                model_name=data.model_name,
+                model_desc=data.model_desc,
+                footer_banner_url=data.footer_banner_url,
+                deco_lines_url=data.deco_lines_url
             )
             db.add(nova_cat)
             db.commit()
