@@ -781,6 +781,128 @@ class UserUpdate(BaseModel):
     custom_expiration: Optional[str] = None # 'vitalicio', 'remover' ou data YYYY-MM-DD
 
 # =========================================================
+# 💰 ROTA DE PAGAMENTO (PIX) - CRÍTICO PARA O MINI APP
+# =========================================================
+
+# Modelo de dados recebido do Frontend
+class PixCreateRequest(BaseModel):
+    bot_id: int
+    plano_id: int
+    plano_nome: str
+    valor: float
+    telegram_id: str
+    first_name: str
+    username: str
+    tem_order_bump: bool = False
+
+@app.post("/api/pagamento/pix")
+def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
+    try:
+        logger.info(f"💰 Iniciando pagamento para: {data.first_name} (R$ {data.valor})")
+
+        # 1. Busca Token do PushinPay
+        config_sys = db.query(SystemConfig).first()
+        # Tenta pegar token do banco ou do ambiente
+        pushin_token = config_sys.pushinpay_token if (config_sys and config_sys.pushinpay_token) else os.getenv("PUSHIN_PAY_TOKEN")
+
+        if not pushin_token:
+            # MODO DE TESTE (Se não tiver token configurado)
+            logger.warning("⚠️ Token PushinPay não encontrado. Gerando PIX simulado.")
+            fake_txid = str(uuid.uuid4())
+            # QR Code fake para teste
+            fake_qr_image = "https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=ExemploPagamentoZenyx"
+            copia_cola = "00020126580014br.gov.bcb.pix0136123e4567-e89b-12d3-a456-4266141740005204000053039865802BR5913Zenyx Teste6008Brasilia62070503***6304"
+            
+            # Cria o pedido no banco
+            novo_pedido = Pedido(
+                bot_id=data.bot_id,
+                telegram_id=data.telegram_id,
+                first_name=data.first_name,
+                username=data.username,
+                valor=data.valor,
+                status='pending',
+                plano_id=data.plano_id,
+                plano_nome=data.plano_nome,
+                txid=fake_txid,
+                qr_code=fake_qr_image, 
+                transaction_id=fake_txid,
+                link_acesso="" 
+            )
+            db.add(novo_pedido)
+            db.commit()
+            
+            return {
+                "txid": fake_txid,
+                "copia_cola": copia_cola,
+                "qr_code": fake_qr_image
+            }
+
+        # 2. GERAÇÃO REAL NO PUSHINPAY
+        url = "https://api.pushinpay.com.br/api/pix/cashIn"
+        headers = {
+            "Authorization": f"Bearer {pushin_token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        
+        # URL do Webhook (Ajuste se seu domínio for diferente)
+        domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-testes-production.up.railway.app")
+        if domain.startswith("https://"): domain = domain.replace("https://", "")
+        
+        payload = {
+            "value": int(data.valor * 100), # Centavos
+            "webhook_url": f"https://{domain}/webhook/pix",
+            "external_reference": f"bot_{data.bot_id}_user_{data.telegram_id}_{int(time.time())}"
+        }
+
+        req = requests.post(url, json=payload, headers=headers)
+        
+        if req.status_code == 200 or req.status_code == 201:
+            resp = req.json()
+            txid = resp.get('id') or resp.get('txid')
+            copia_cola = resp.get('qr_code_text') or resp.get('pixCopiaEcola')
+            qr_image = resp.get('qr_code_image_url') or resp.get('qr_code')
+
+            # Salva Pedido
+            novo_pedido = Pedido(
+                bot_id=data.bot_id,
+                telegram_id=data.telegram_id,
+                first_name=data.first_name,
+                username=data.username,
+                valor=data.valor,
+                status='pending',
+                plano_id=data.plano_id,
+                plano_nome=data.plano_nome,
+                txid=str(txid),
+                qr_code=qr_image,
+                transaction_id=str(txid),
+                link_acesso=""
+            )
+            db.add(novo_pedido)
+            db.commit()
+
+            return {
+                "txid": str(txid),
+                "copia_cola": copia_cola,
+                "qr_code": qr_image
+            }
+        else:
+            logger.error(f"Erro PushinPay: {req.text}")
+            raise HTTPException(status_code=400, detail="Erro ao gerar PIX no gateway.")
+
+    except Exception as e:
+        logger.error(f"Erro fatal ao gerar PIX: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/pagamento/status/{txid}")
+def verificar_status_pix(txid: str, db: Session = Depends(get_db)):
+    pedido = db.query(Pedido).filter(Pedido.txid == txid).first()
+    if not pedido:
+        raise HTTPException(status_code=404, detail="Pedido não encontrado")
+    
+    return {"status": pedido.status}
+
+# =========================================================
 # ⚙️ HELPER: CONFIGURAR MENU (COMANDOS)
 # =========================================================
 def configurar_menu_bot(token):
