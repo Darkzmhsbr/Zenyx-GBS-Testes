@@ -743,6 +743,31 @@ class MiniAppConfigUpdate(BaseModel):
     # Conteúdo (JSON String)
     content_json: Optional[str] = "[]" # Lista de vídeos/cards
 
+# =========================================================
+# 👇 COLE ISSO NO SEU MAIN.PY (Perto da linha 630)
+# =========================================================
+
+class CategoryCreate(BaseModel):
+    id: Optional[int] = None
+    bot_id: int
+    title: str
+    description: Optional[str] = None
+    cover_image: Optional[str] = None
+    banner_mob_url: Optional[str] = None
+    theme_color: Optional[str] = "#c333ff"
+    is_direct_checkout: bool = False
+    is_hacker_mode: bool = False
+    content_json: Optional[str] = "[]"
+    # --- NOVOS CAMPOS PARA O VISUAL RICO ---
+    bg_color: Optional[str] = "#000000"
+    banner_desk_url: Optional[str] = None
+    video_preview_url: Optional[str] = None
+    model_img_url: Optional[str] = None
+    model_name: Optional[str] = None
+    model_desc: Optional[str] = None
+    footer_banner_url: Optional[str] = None
+    deco_lines_url: Optional[str] = None
+
 # --- MODELO DE PERFIL ---
 class ProfileUpdate(BaseModel):
     name: str
