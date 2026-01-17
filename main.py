@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime, timedelta
 from database import Lead  # Não esqueça de importar Lead!
+from force_migration import forcar_atualizacao_tabelas
 
 
 # Importa o banco e o script de reparo
@@ -34,6 +35,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Zenyx Gbot SaaS")
+
+# 🔥 FORÇA A CRIAÇÃO DAS COLUNAS AO INICIAR
+try:
+    forcar_atualizacao_tabelas()
+except Exception as e:
+    print(f"Erro na migração forçada: {e}")
 
 app.add_middleware(
     CORSMiddleware,
