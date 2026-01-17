@@ -718,13 +718,18 @@ class MiniAppConfigUpdate(BaseModel):
     # Footer
     footer_text: Optional[str] = None
 
-class MiniAppCategoryCreate(BaseModel):
+# Modelo Pydantic para criar/editar Categoria
+class CategoryCreate(BaseModel):
+    id: Optional[int] = None # <--- CRUCIAL: Permite receber o ID para edição
     bot_id: int
     title: str
-    slug: Optional[str] = None # Se vazio, gera auto
     description: Optional[str] = None
     cover_image: Optional[str] = None
+    banner_mob_url: Optional[str] = None
     theme_color: Optional[str] = "#c333ff"
+    is_direct_checkout: bool = False
+    is_hacker_mode: bool = False
+    content_json: Optional[str] = "[]"
     
     # Flags Especiais
     is_direct_checkout: bool = False
@@ -1721,32 +1726,52 @@ def save_miniapp_config(bot_id: int, dados: MiniAppConfigUpdate, db: Session = D
 
 # 3. Criar Categoria
 @app.post("/api/admin/miniapp/categories")
-def create_miniapp_category(dados: MiniAppCategoryCreate, db: Session = Depends(get_db)):
-    # Gera slug se não vier
-    if not dados.slug:
-        import re
-        slug = dados.title.lower().strip()
-        slug = re.sub(r'[^a-z0-9]+', '-', slug).strip('-')
-        dados.slug = f"{slug}-{int(time.time())}"
+def create_or_update_category(data: CategoryCreate, db: Session = Depends(get_db)):
+    try:
+        # Verifica se é EDICAO (tem ID) ou CRIAÇÃO (não tem ID)
+        if data.id:
+            # --- MODO EDIÇÃO ---
+            categoria = db.query(MiniAppCategory).filter(MiniAppCategory.id == data.id).first()
+            if not categoria:
+                raise HTTPException(status_code=404, detail="Categoria não encontrada para edição")
+            
+            # Atualiza os campos
+            categoria.title = data.title
+            categoria.description = data.description
+            categoria.cover_image = data.cover_image
+            categoria.banner_mob_url = data.banner_mob_url
+            categoria.theme_color = data.theme_color
+            categoria.is_direct_checkout = data.is_direct_checkout
+            categoria.is_hacker_mode = data.is_hacker_mode
+            categoria.content_json = data.content_json
+            
+            db.commit()
+            db.refresh(categoria)
+            logger.info(f"📂 Categoria Atualizada: {categoria.title} (ID: {categoria.id})")
+            return categoria
         
-    nova_cat = MiniAppCategory(
-        bot_id=dados.bot_id,
-        title=dados.title,
-        slug=dados.slug,
-        description=dados.description,
-        cover_image=dados.cover_image,
-        theme_color=dados.theme_color,
-        is_direct_checkout=dados.is_direct_checkout,
-        is_hacker_mode=dados.is_hacker_mode,
-        banner_desk_url=dados.banner_desk_url,
-        banner_mob_url=dados.banner_mob_url,
-        footer_banner_url=dados.footer_banner_url,
-        deco_line_url=dados.deco_line_url,
-        content_json=dados.content_json
-    )
-    db.add(nova_cat)
-    db.commit()
-    return {"status": "ok", "id": nova_cat.id}
+        else:
+            # --- MODO CRIAÇÃO ---
+            nova_cat = MiniAppCategory(
+                bot_id=data.bot_id,
+                title=data.title,
+                description=data.description,
+                cover_image=data.cover_image,
+                banner_mob_url=data.banner_mob_url,
+                theme_color=data.theme_color,
+                is_direct_checkout=data.is_direct_checkout,
+                is_hacker_mode=data.is_hacker_mode,
+                content_json=data.content_json
+            )
+            db.add(nova_cat)
+            db.commit()
+            db.refresh(nova_cat)
+            logger.info(f"📂 Nova Categoria Criada: {nova_cat.title}")
+            return nova_cat
+
+    except Exception as e:
+        logger.error(f"Erro ao salvar categoria: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # 4. Listar Categorias de um Bot
 @app.get("/api/admin/bots/{bot_id}/miniapp/categories")
