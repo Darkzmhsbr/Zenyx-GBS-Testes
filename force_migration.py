@@ -25,7 +25,10 @@ def forcar_atualizacao_tabelas():
         "model_name VARCHAR",
         "model_desc TEXT",
         "footer_banner_url VARCHAR",
-        "deco_lines_url VARCHAR"
+        "deco_lines_url VARCHAR",
+        # NOVAS
+        "model_name_color VARCHAR DEFAULT '#ffffff'",
+        "model_desc_color VARCHAR DEFAULT '#cccccc'"
     ]
 
     with engine.connect() as conn:

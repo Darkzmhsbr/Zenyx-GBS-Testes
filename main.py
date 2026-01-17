@@ -758,6 +758,7 @@ class CategoryCreate(BaseModel):
     id: Optional[int] = None
     bot_id: int
     title: str
+    slug: Optional[str] = None  # <--- GARANTINDO O SLUG AQUI
     description: Optional[str] = None
     cover_image: Optional[str] = None
     banner_mob_url: Optional[str] = None
@@ -765,7 +766,7 @@ class CategoryCreate(BaseModel):
     is_direct_checkout: bool = False
     is_hacker_mode: bool = False
     content_json: Optional[str] = "[]"
-    # --- NOVOS CAMPOS PARA O VISUAL RICO ---
+    # --- VISUAL RICO ---
     bg_color: Optional[str] = "#000000"
     banner_desk_url: Optional[str] = None
     video_preview_url: Optional[str] = None
@@ -774,6 +775,9 @@ class CategoryCreate(BaseModel):
     model_desc: Optional[str] = None
     footer_banner_url: Optional[str] = None
     deco_lines_url: Optional[str] = None
+    # --- NOVAS CORES ---
+    model_name_color: Optional[str] = "#ffffff"
+    model_desc_color: Optional[str] = "#cccccc"
 
 # --- MODELO DE PERFIL ---
 class ProfileUpdate(BaseModel):
@@ -1759,15 +1763,23 @@ def save_miniapp_config(bot_id: int, dados: MiniAppConfigUpdate, db: Session = D
 @app.post("/api/admin/miniapp/categories")
 def create_or_update_category(data: CategoryCreate, db: Session = Depends(get_db)):
     try:
-        # Verifica se é EDICAO (tem ID) ou CRIAÇÃO (não tem ID)
+        # Se não vier slug, cria um baseado no título
+        final_slug = data.slug
+        if not final_slug and data.title:
+            import re
+            import unicodedata
+            # Normaliza slug (ex: "Praia de Nudismo" -> "praia-de-nudismo")
+            s = unicodedata.normalize('NFKD', data.title).encode('ascii', 'ignore').decode('utf-8')
+            final_slug = re.sub(r'[^a-zA-Z0-9]+', '-', s.lower()).strip('-')
+
         if data.id:
-            # --- MODO EDIÇÃO ---
+            # --- EDIÇÃO ---
             categoria = db.query(MiniAppCategory).filter(MiniAppCategory.id == data.id).first()
             if not categoria:
-                raise HTTPException(status_code=404, detail="Categoria não encontrada para edição")
+                raise HTTPException(status_code=404, detail="Categoria não encontrada")
             
-            # Atualiza os campos BÁSICOS
             categoria.title = data.title
+            categoria.slug = final_slug # <--- SALVANDO SLUG
             categoria.description = data.description
             categoria.cover_image = data.cover_image
             categoria.banner_mob_url = data.banner_mob_url
@@ -1776,7 +1788,7 @@ def create_or_update_category(data: CategoryCreate, db: Session = Depends(get_db
             categoria.is_hacker_mode = data.is_hacker_mode
             categoria.content_json = data.content_json
             
-            # Atualiza os campos NOVOS (VISUAL RICO)
+            # Campos Visuais
             categoria.bg_color = data.bg_color
             categoria.banner_desk_url = data.banner_desk_url
             categoria.video_preview_url = data.video_preview_url
@@ -1786,16 +1798,20 @@ def create_or_update_category(data: CategoryCreate, db: Session = Depends(get_db
             categoria.footer_banner_url = data.footer_banner_url
             categoria.deco_lines_url = data.deco_lines_url
             
+            # Cores Texto
+            categoria.model_name_color = data.model_name_color
+            categoria.model_desc_color = data.model_desc_color
+            
             db.commit()
             db.refresh(categoria)
-            logger.info(f"📂 Categoria Atualizada: {categoria.title} (ID: {categoria.id})")
             return categoria
         
         else:
-            # --- MODO CRIAÇÃO ---
+            # --- CRIAÇÃO ---
             nova_cat = MiniAppCategory(
                 bot_id=data.bot_id,
                 title=data.title,
+                slug=final_slug, # <--- SALVANDO SLUG
                 description=data.description,
                 cover_image=data.cover_image,
                 banner_mob_url=data.banner_mob_url,
@@ -1803,7 +1819,6 @@ def create_or_update_category(data: CategoryCreate, db: Session = Depends(get_db
                 is_direct_checkout=data.is_direct_checkout,
                 is_hacker_mode=data.is_hacker_mode,
                 content_json=data.content_json,
-                # NOVOS CAMPOS
                 bg_color=data.bg_color,
                 banner_desk_url=data.banner_desk_url,
                 video_preview_url=data.video_preview_url,
@@ -1811,12 +1826,13 @@ def create_or_update_category(data: CategoryCreate, db: Session = Depends(get_db
                 model_name=data.model_name,
                 model_desc=data.model_desc,
                 footer_banner_url=data.footer_banner_url,
-                deco_lines_url=data.deco_lines_url
+                deco_lines_url=data.deco_lines_url,
+                model_name_color=data.model_name_color,
+                model_desc_color=data.model_desc_color
             )
             db.add(nova_cat)
             db.commit()
             db.refresh(nova_cat)
-            logger.info(f"📂 Nova Categoria Criada: {nova_cat.title}")
             return nova_cat
 
     except Exception as e:

@@ -345,6 +345,7 @@ class MiniAppConfig(Base):
     bot = relationship("Bot", back_populates="miniapp_config")
 
 # 2. Categorias e Conteúdo
+# 2. Categorias e Conteúdo
 class MiniAppCategory(Base):
     __tablename__ = "miniapp_categories"
     id = Column(Integer, primary_key=True, index=True)
@@ -364,6 +365,10 @@ class MiniAppCategory(Base):
     model_desc = Column(String, nullable=True)
     footer_banner_url = Column(String, nullable=True)
     deco_lines_url = Column(String, nullable=True)
+    
+    # 🔥 NOVAS CORES DE TEXTO
+    model_name_color = Column(String, default="#ffffff")
+    model_desc_color = Column(String, default="#cccccc")
     # --------------------
     
     theme_color = Column(String, default="#c333ff")
