@@ -345,10 +345,6 @@ class MiniAppConfig(Base):
     bot = relationship("Bot", back_populates="miniapp_config")
 
 # 2. Categorias e Conteúdo
-# ❌ APAGUE ESTE BLOCO DO SEU main.py ❌
-# (Ele está causando o erro porque 'Base' não existe aqui e a classe já foi importada)
-
-# Modelo Pydantic para criar/editar Categoria
 class MiniAppCategory(Base):
     __tablename__ = "miniapp_categories"
     id = Column(Integer, primary_key=True, index=True)
@@ -358,32 +354,21 @@ class MiniAppCategory(Base):
     description = Column(String)
     cover_image = Column(String) # cardImg
     banner_mob_url = Column(String)
-    # --- NOVOS CAMPOS ---
+    
+    # --- NOVOS CAMPOS VISUAL RICO ---
     bg_color = Column(String, default="#000000")
-    banner_desk_url = Column(String)
-    video_preview_url = Column(String)
-    model_img_url = Column(String)
-    model_name = Column(String)
-    model_desc = Column(String)
-    footer_banner_url = Column(String)
-    deco_lines_url = Column(String)
+    banner_desk_url = Column(String, nullable=True)
+    video_preview_url = Column(String, nullable=True)
+    model_img_url = Column(String, nullable=True)
+    model_name = Column(String, nullable=True)
+    model_desc = Column(String, nullable=True)
+    footer_banner_url = Column(String, nullable=True)
+    deco_lines_url = Column(String, nullable=True)
     # --------------------
+    
     theme_color = Column(String, default="#c333ff")
     is_direct_checkout = Column(Boolean, default=False)
     is_hacker_mode = Column(Boolean, default=False)
     content_json = Column(Text)
-    
-    # Flags Especiais
-    is_direct_checkout: bool = False
-    is_hacker_mode: bool = False
-
-    # Detalhes Visuais
-    banner_desk_url: Optional[str] = None
-    banner_mob_url: Optional[str] = None
-    footer_banner_url: Optional[str] = None
-    deco_line_url: Optional[str] = None
-    
-    # Conteúdo (JSON String)
-    content_json: Optional[str] = "[]" # Lista de vídeos/cards
     
     bot = relationship("Bot", back_populates="miniapp_categories")
