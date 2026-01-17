@@ -729,31 +729,6 @@ class MiniAppConfigUpdate(BaseModel):
     
     # Footer
     footer_text: Optional[str] = None
-
-# Modelo Pydantic para criar/editar Categoria
-class MiniAppCategory(Base):
-    __tablename__ = "miniapp_categories"
-    id = Column(Integer, primary_key=True, index=True)
-    bot_id = Column(Integer, ForeignKey("bots.id"))
-    slug = Column(String)
-    title = Column(String)
-    description = Column(String)
-    cover_image = Column(String) # cardImg
-    banner_mob_url = Column(String)
-    # --- NOVOS CAMPOS ---
-    bg_color = Column(String, default="#000000")
-    banner_desk_url = Column(String)
-    video_preview_url = Column(String)
-    model_img_url = Column(String)
-    model_name = Column(String)
-    model_desc = Column(String)
-    footer_banner_url = Column(String)
-    deco_lines_url = Column(String)
-    # --------------------
-    theme_color = Column(String, default="#c333ff")
-    is_direct_checkout = Column(Boolean, default=False)
-    is_hacker_mode = Column(Boolean, default=False)
-    content_json = Column(Text)
     
     # Flags Especiais
     is_direct_checkout: bool = False
