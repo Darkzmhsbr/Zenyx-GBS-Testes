@@ -813,6 +813,106 @@ class RemarketingRequest(BaseModel):
     tipo_envio: Optional[str] = None 
     expire_timestamp: Optional[int] = 0
 
+# =========================================================
+# 📢 ROTAS DE REMARKETING (FALTANDO)
+# =========================================================
+
+# Modelo para envio
+class RemarketingSend(BaseModel):
+    bot_id: int
+    target: str # 'todos', 'topo', 'meio', 'fundo', 'expirados'
+    mensagem: str
+    media_url: Optional[str] = None
+    incluir_oferta: bool = False
+    plano_oferta_id: Optional[str] = None # Pode vir como string do front
+    agendar: bool = False
+    data_agendamento: Optional[datetime] = None
+    is_test: bool = False
+    specific_user_id: Optional[str] = None
+
+@app.post("/api/admin/bots/{bot_id}/remarketing/send")
+def send_remarketing(bot_id: int, data: RemarketingSend, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    try:
+        logger.info(f"📢 Iniciando Remarketing para Bot {bot_id} | Target: {data.target}")
+        
+        # 1. Configura a Campanha
+        campaign_id = str(uuid.uuid4())
+        nova_campanha = RemarketingCampaign(
+            bot_id=bot_id,
+            campaign_id=campaign_id,
+            target=data.target,
+            type='teste' if data.is_test else 'massivo',
+            config=json.dumps({
+                "mensagem": data.mensagem,
+                "media": data.media_url,
+                "oferta": data.incluir_oferta,
+                "plano_id": data.plano_oferta_id
+            }),
+            status='agendado' if data.agendar else 'enviando',
+            data_envio=datetime.utcnow()
+        )
+        db.add(nova_campanha)
+        db.commit()
+
+        # 2. Se for teste, envia só para o admin/user específico
+        if data.is_test:
+            target_id = data.specific_user_id
+            if not target_id:
+                # Tenta pegar o admin do bot
+                bot = db.query(Bot).filter(Bot.id == bot_id).first()
+                target_id = bot.admin_principal_id
+            
+            if target_id:
+                background_tasks.add_task(
+                    disparar_mensagem_individual, 
+                    bot_id, 
+                    target_id, 
+                    data.mensagem, 
+                    data.media_url
+                )
+                return {"status": "success", "message": f"Teste enviado para {target_id}"}
+            else:
+                return {"status": "error", "message": "Nenhum ID definido para teste"}
+
+        # 3. Se for envio real (Massivo)
+        if not data.agendar:
+            background_tasks.add_task(processar_remarketing_massivo, campaign_id, db)
+        
+        return {"status": "success", "campaign_id": campaign_id}
+
+    except Exception as e:
+        logger.error(f"Erro no remarketing: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/bots/{bot_id}/remarketing/history")
+def get_remarketing_history(bot_id: int, page: int = 1, limit: int = 10, db: Session = Depends(get_db)):
+    try:
+        skip = (page - 1) * limit
+        total = db.query(RemarketingCampaign).filter(RemarketingCampaign.bot_id == bot_id).count()
+        campanhas = db.query(RemarketingCampaign)\
+            .filter(RemarketingCampaign.bot_id == bot_id)\
+            .order_by(desc(RemarketingCampaign.data_envio))\
+            .offset(skip)\
+            .limit(limit)\
+            .all()
+            
+        return {
+            "data": campanhas,
+            "total": total,
+            "page": page,
+            "pages": (total // limit) + 1
+        }
+    except Exception as e:
+        logger.error(f"Erro ao buscar histórico: {e}")
+        return {"data": [], "total": 0}
+
+# Função Auxiliar (Adicione se não existir)
+def processar_remarketing_massivo(campaign_id: str, db: Session):
+    # Lógica simplificada de disparo (você pode expandir depois)
+    logger.info(f"🚀 Processando campanha {campaign_id}...")
+    # Aqui iria a lógica de buscar usuários e loop de envio
+    pass
+
     # ---   
 # Modelo para Atualização de Usuário (CRM)
 class UserUpdate(BaseModel):
