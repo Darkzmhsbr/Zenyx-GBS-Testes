@@ -3447,82 +3447,67 @@ class IndividualRemarketingRequest(BaseModel):
     user_telegram_id: str
     campaign_history_id: int # ID do histórico para copiar a msg
 
+# --- ROTA DE REENVIO INDIVIDUAL (VIA HISTÓRICO) ---
 @app.post("/api/admin/remarketing/send-individual")
 def enviar_remarketing_individual(payload: IndividualRemarketingRequest, db: Session = Depends(get_db)):
-    # 1. Busca os dados da campanha antiga
+    # 1. Busca campanha original
     campanha = db.query(RemarketingCampaign).filter(RemarketingCampaign.id == payload.campaign_history_id).first()
-    if not campanha:
-        raise HTTPException(404, "Campanha original não encontrada")
+    if not campanha: raise HTTPException(404, "Campanha não encontrada")
     
-    # 2. Decodifica a configuração
+    # 2. Config
     try:
         config = json.loads(campanha.config) if isinstance(campanha.config, str) else campanha.config
-        # Se config for string dentro de um json (caso antigo), tenta parsear de novo
         if isinstance(config, str): config = json.loads(config)
-    except:
-        config = {}
+    except: config = {}
 
-    # 3. Reconstrói o Payload
     msg = config.get("msg", "")
     media = config.get("media", "")
-    
-    # [CORREÇÃO CRÍTICA] Não buscamos mais 'offer' do config JSON, pois ele pode não ter sido salvo lá.
-    # A verificação será feita direto pelo ID do plano na tabela.
 
-    # 4. Prepara envio
+    # 3. Bot
     bot_db = db.query(Bot).filter(Bot.id == payload.bot_id).first()
     if not bot_db: raise HTTPException(404, "Bot não encontrado")
     
     sender = telebot.TeleBot(bot_db.token)
     
-    # 5. Monta Botão (CORRIGIDO: Se tiver plano_id no banco, TEM oferta)
+    # 4. Reconstrói Botão (Se tinha plano salvo)
     markup = None
     if campanha.plano_id:
-        # Recupera plano
         plano = db.query(PlanoConfig).filter(PlanoConfig.id == campanha.plano_id).first()
         if plano:
             markup = types.InlineKeyboardMarkup()
-            # Usa o preço promocional salvo na campanha ou o atual
-            preco = campanha.promo_price or plano.preco_atual
-            btn_text = f"🔥 {plano.nome_exibicao} - R$ {preco:.2f}"
+            # Usa o preço que foi salvo na campanha (promo_price) ou o atual
+            preco = campanha.promo_price if campanha.promo_price else plano.preco_atual
             
-            # OBS: Usamos um checkout direto aqui para garantir que funcione, 
-            # já que links de promoções antigas poderiam estar expirados.
-            # Se quiser forçar a mesma campanha, use f"promo_{campanha.campaign_id}"
-            # Mas checkout direto é mais seguro para disparo individual manual.
+            preco_txt = f"{preco:.2f}".replace('.', ',')
+            btn_text = f"🔥 {plano.nome_exibicao} - R$ {preco_txt}"
+            
+            # Checkout direto para garantir funcionamento
             markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"checkout_{plano.id}"))
 
-    # 6. Envia
+    # 5. Envio (HTML)
     try:
         if media:
             try:
-                # Tenta enviar como vídeo ou foto
-                if media.lower().endswith(('.mp4', '.mov', '.avi')):
-                    sender.send_video(payload.user_telegram_id, media, caption=msg, reply_markup=markup)
+                ext = media.lower()
+                if ext.endswith(('.mp4', '.mov', '.avi')):
+                    sender.send_video(payload.user_telegram_id, media, caption=msg, reply_markup=markup, parse_mode="HTML")
                 else:
-                    sender.send_photo(payload.user_telegram_id, media, caption=msg, reply_markup=markup)
-            except Exception as e_media:
-                # Se falhar a mídia (link quebrado), envia só texto com o botão
-                logger.warning(f"Falha ao enviar mídia: {e_media}. Tentando texto.")
-                sender.send_message(payload.user_telegram_id, msg, reply_markup=markup)
+                    sender.send_photo(payload.user_telegram_id, media, caption=msg, reply_markup=markup, parse_mode="HTML")
+            except:
+                # Fallback texto
+                sender.send_message(payload.user_telegram_id, msg, reply_markup=markup, parse_mode="HTML")
         else:
-            sender.send_message(payload.user_telegram_id, msg, reply_markup=markup)
+            sender.send_message(payload.user_telegram_id, msg, reply_markup=markup, parse_mode="HTML")
             
-        return {"status": "sent", "msg": "Mensagem enviada com sucesso!"}
+        return {"status": "sent", "msg": "Reenviado com sucesso!"}
     except Exception as e:
-        logger.error(f"Erro envio individual: {e}")
-        # Retorna erro 500 para o frontend saber
-        raise HTTPException(status_code=500, detail=f"Falha ao enviar: {str(e)}")
+        logger.error(f"Erro reenvio: {e}")
+        raise HTTPException(500, detail=str(e))
 
 # =========================================================
-# 📢 LÓGICA DE REMARKETING (ALINHADA COM O FRONTEND + LÓGICA DE CONJUNTOS)
+# 📢 LÓGICA DE REMARKETING (CORRIGIDA: HTML + SALVAR OFERTA NO HISTÓRICO)
 # =========================================================
-CAMPAIGN_STATUS = {
-    "running": False,
-    "sent": 0,
-    "total": 0,
-    "blocked": 0
-}
+CAMPAIGN_STATUS = { "running": False, "sent": 0, "total": 0, "blocked": 0 }
 
 def processar_envio_remarketing(bot_id: int, payload: RemarketingRequest, db: Session):
     global CAMPAIGN_STATUS
@@ -3533,37 +3518,32 @@ def processar_envio_remarketing(bot_id: int, payload: RemarketingRequest, db: Se
         CAMPAIGN_STATUS["running"] = False
         return
 
-    # --- 1. IDENTIFICAÇÃO DO FILTRO (CORREÇÃO CRÍTICA) ---
-    # Seu Frontend manda 'target'. Ex: "pendentes", "todos", etc.
+    # 1. Filtro
     filtro_limpo = str(payload.target).lower().strip()
-    
-    # Fallback: Se por acaso vier tipo_envio (teste de API manual), usa ele
-    if payload.tipo_envio:
-        filtro_limpo = str(payload.tipo_envio).lower().strip()
+    if payload.tipo_envio: filtro_limpo = str(payload.tipo_envio).lower().strip()
+    logger.info(f"🚀 INICIANDO DISPARO | Bot: {bot_db.nome} | Filtro: {filtro_limpo}")
 
-    logger.info(f"🚀 INICIANDO DISPARO | Bot: {bot_db.nome} | Filtro Solicitado: {filtro_limpo}")
-
-    # --- 2. PREPARAÇÃO DA MENSAGEM E OFERTA ---
+    # 2. Oferta
     uuid_campanha = str(uuid.uuid4())
     data_expiracao = None
     preco_final = 0.0
     plano_db = None
 
     if payload.incluir_oferta and payload.plano_oferta_id:
-        # Busca plano pelo ID ou Key
+        # Tenta buscar por ID ou Key
         plano_db = db.query(PlanoConfig).filter(
             (PlanoConfig.key_id == str(payload.plano_oferta_id)) | 
             (PlanoConfig.id == int(payload.plano_oferta_id) if str(payload.plano_oferta_id).isdigit() else False)
         ).first()
 
         if plano_db:
-            # Lógica de preço (Baseada no JSX: price_mode e custom_price)
+            # Preço Customizado?
             if payload.price_mode == 'custom' and payload.custom_price and payload.custom_price > 0:
                 preco_final = payload.custom_price
             else:
                 preco_final = plano_db.preco_atual
             
-            # Lógica de expiração (Baseada no JSX: expiration_mode e expiration_value)
+            # Expiração?
             if payload.expiration_mode != "none" and payload.expiration_value > 0:
                 agora = datetime.utcnow()
                 val = payload.expiration_value
@@ -3571,77 +3551,49 @@ def processar_envio_remarketing(bot_id: int, payload: RemarketingRequest, db: Se
                 elif payload.expiration_mode == "hours": data_expiracao = agora + timedelta(hours=val)
                 elif payload.expiration_mode == "days": data_expiracao = agora + timedelta(days=val)
 
-    # --- 3. SELEÇÃO DE PÚBLICO (SETS MATEMÁTICOS - INFALÍVEL) ---
+    # 3. Lista de IDs
     bot_sender = telebot.TeleBot(bot_db.token)
     lista_final_ids = []
 
     if payload.is_test:
-        # Modo Teste: Envia apenas para o ID específico ou Admin
-        if payload.specific_user_id:
-            lista_final_ids = [str(payload.specific_user_id).strip()]
+        if payload.specific_user_id: lista_final_ids = [str(payload.specific_user_id).strip()]
         else:
             adm = db.query(BotAdmin).filter(BotAdmin.bot_id == bot_id).first()
             if adm: lista_final_ids = [str(adm.telegram_id).strip()]
-        logger.info(f"🧪 MODO TESTE: Enviando para {lista_final_ids}")
-
     else:
-        # A) Busca TODOS os IDs únicos deste bot
+        # (Mantive a lógica original de sets que estava correta)
         q_todos = db.query(Pedido.telegram_id).filter(Pedido.bot_id == bot_id).distinct()
         ids_todos = {str(r[0]).strip() for r in q_todos.all() if r[0]}
-
-        # B) Busca PAGOS (Ids de quem tem status positivo)
-        # Atenção: func.lower garante que pegue 'Paid', 'paid', 'PAID'
-        q_pagos = db.query(Pedido.telegram_id).filter(
-            Pedido.bot_id == bot_id, 
-            func.lower(Pedido.status).in_(['paid', 'active', 'approved', 'completed', 'succeeded'])
-        ).distinct()
+        
+        q_pagos = db.query(Pedido.telegram_id).filter(Pedido.bot_id == bot_id, func.lower(Pedido.status).in_(['paid', 'active', 'approved', 'completed', 'succeeded'])).distinct()
         ids_pagantes = {str(r[0]).strip() for r in q_pagos.all() if r[0]}
-
-        # C) Busca EXPIRADOS
-        q_expirados = db.query(Pedido.telegram_id).filter(
-            Pedido.bot_id == bot_id, 
-            func.lower(Pedido.status) == 'expired'
-        ).distinct()
+        
+        q_expirados = db.query(Pedido.telegram_id).filter(Pedido.bot_id == bot_id, func.lower(Pedido.status) == 'expired').distinct()
         ids_expirados = {str(r[0]).strip() for r in q_expirados.all() if r[0]}
 
-        # --- APLICAÇÃO DO FILTRO (AQUI OCORRE A MÁGICA) ---
-        
         if filtro_limpo in ['pendentes', 'leads', 'nao_pagantes']:
-            # Lógica: Pega TODOS e remove quem PAGOU e quem já foi CLIENTE (expirado)
-            # Resultado: Só sobra leads frios (nunca compraram)
             lista_final_ids = list(ids_todos - ids_pagantes - ids_expirados)
-            logger.info(f"📊 FILTRO PENDENTES: {len(ids_todos)} (Total) - {len(ids_pagantes)} (Pagos) - {len(ids_expirados)} (Expirados) = {len(lista_final_ids)}")
-
         elif filtro_limpo in ['pagantes', 'ativos']:
             lista_final_ids = list(ids_pagantes)
-            
         elif filtro_limpo in ['expirados', 'ex_assinantes']:
-            # Lógica: Quem expirou MENOS quem renovou (pagou)
             lista_final_ids = list(ids_expirados - ids_pagantes)
-            
-        elif filtro_limpo == 'todos':
-            lista_final_ids = list(ids_todos)
-            
         else:
-            # Se não reconheceu o filtro, por segurança NÃO envia ou envia log de erro
-            logger.warning(f"⚠️ Filtro desconhecido '{filtro_limpo}'. Assumindo TODOS por segurança.")
             lista_final_ids = list(ids_todos)
 
     CAMPAIGN_STATUS["total"] = len(lista_final_ids)
 
-    # --- 4. BOTÃO ---
+    # 4. Markup (Botão)
     markup = None
     if plano_db:
         markup = types.InlineKeyboardMarkup()
-        btn_text = f"🔥 {plano_db.nome_exibicao} - R$ {preco_final:.2f}"
+        # Formata preço R$ 19,90
+        preco_txt = f"{preco_final:.2f}".replace('.', ',')
+        btn_text = f"🔥 {plano_db.nome_exibicao} - R$ {preco_txt}"
         
-        if payload.is_test:
-             markup.add(types.InlineKeyboardButton(f"[TESTE] {btn_text}", callback_data=f"checkout_{plano_db.id}"))
-        else:
-             # O callback promo_UUID vai acionar a verificação de validade no webhook
-             markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"promo_{uuid_campanha}"))
+        callback_data = f"checkout_{plano_db.id}" if payload.is_test else f"promo_{uuid_campanha}"
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=callback_data))
 
-    # --- 5. LOOP DE ENVIO ---
+    # 5. Envio (USANDO HTML AGORA)
     sent_count = 0
     blocked_count = 0
 
@@ -3654,15 +3606,15 @@ def processar_envio_remarketing(bot_id: int, payload: RemarketingRequest, db: Se
                 try:
                     ext = payload.media_url.lower()
                     if ext.endswith(('.mp4', '.mov', '.avi')):
-                        bot_sender.send_video(uid, payload.media_url, caption=payload.mensagem, reply_markup=markup, parse_mode="Markdown")
+                        bot_sender.send_video(uid, payload.media_url, caption=payload.mensagem, reply_markup=markup, parse_mode="HTML")
                     else:
-                        bot_sender.send_photo(uid, payload.media_url, caption=payload.mensagem, reply_markup=markup, parse_mode="Markdown")
+                        bot_sender.send_photo(uid, payload.media_url, caption=payload.mensagem, reply_markup=markup, parse_mode="HTML")
                     midia_ok = True
                 except: pass 
             
-            # Texto (se não foi mídia)
+            # Texto
             if not midia_ok:
-                bot_sender.send_message(uid, payload.mensagem, reply_markup=markup, parse_mode="Markdown")
+                bot_sender.send_message(uid, payload.mensagem, reply_markup=markup, parse_mode="HTML")
             
             sent_count += 1
             time.sleep(0.04) 
@@ -3674,14 +3626,22 @@ def processar_envio_remarketing(bot_id: int, payload: RemarketingRequest, db: Se
 
     CAMPAIGN_STATUS["running"] = False
     
-    # Salva Histórico
+    # 6. Salvar Histórico Completo (CRUCIAL PARA REENVIO)
     if not payload.is_test:
+        config_completa = {
+            "msg": payload.mensagem,
+            "media": payload.media_url,
+            "offer": payload.incluir_oferta,
+            "plano_id": payload.plano_oferta_id, # Salva o ID original
+            "custom_price": preco_final # Salva o preço que foi usado
+        }
+        
         campanha_db = RemarketingCampaign(
             bot_id=bot_id,
             campaign_id=uuid_campanha,
             type="massivo",
-            target=filtro_limpo, # Salva o filtro correto que foi usado
-            config=json.dumps({"msg": payload.mensagem, "media": payload.media_url}),
+            target=filtro_limpo,
+            config=json.dumps(config_completa), # Salva JSON completo
             status="concluido",
             plano_id=plano_db.id if plano_db else None,
             promo_price=preco_final if plano_db else None,
@@ -3693,7 +3653,7 @@ def processar_envio_remarketing(bot_id: int, payload: RemarketingRequest, db: Se
         db.add(campanha_db)
         db.commit()
 
-    logger.info(f"✅ FINALIZADO: {sent_count} enviados / {blocked_count} bloqueados")
+    logger.info(f"✅ FINALIZADO: {sent_count} envios")
 
 # --- ROTAS DA API ---
 
