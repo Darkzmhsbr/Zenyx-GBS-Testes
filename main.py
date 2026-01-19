@@ -222,62 +222,6 @@ def registrar_remarketing(
         db.commit()
         logger.info(f"📧 Remarketing registrado (MEIO): {pedido.first_name}")
 
-
-# =========================================================
-# 🛒 ROTA PÚBLICA PARA O MINI APP (FALTAVA ESSA)
-# =========================================================
-@app.get("/api/miniapp/{bot_id}")
-def get_miniapp_config(bot_id: int, db: Session = Depends(get_db)):
-    # Busca configurações
-    config = db.query(MiniAppConfig).filter(MiniAppConfig.bot_id == bot_id).first()
-    cats = db.query(MiniAppCategory).filter(MiniAppCategory.bot_id == bot_id).all()
-    flow = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
-    
-    # Se não tiver config, retorna padrão para não quebrar o front
-    start_mode = getattr(flow, 'start_mode', 'padrao') if flow else 'padrao'
-    
-    if not config:
-        return {
-            "config": {
-                "hero_title": "Loja VIP", 
-                "background_value": "#000000",
-                "start_mode": start_mode
-            },
-            "categories": [],
-            "flow": {"start_mode": start_mode}
-        }
-
-    return {
-        "config": config,
-        "categories": cats,
-        "flow": {
-            "start_mode": start_mode,
-            "miniapp_url": getattr(flow, 'miniapp_url', ''),
-            "miniapp_btn_text": getattr(flow, 'miniapp_btn_text', 'ABRIR LOJA')
-        }
-    }
-
-# ---------------------------------------------------------
-# AQUI COMEÇA O @app.on_event("startup")...
-# ---------------------------------------------------------
-
-# =========================================================
-# 2. AUTO-REPARO DO BANCO DE DADOS (LISTA MESTRA DE CORREÇÃO)
-# =========================================================
-@app.on_event("startup")
-def on_startup():
-    print("Starting Container")
-    
-    # 1. Executa migrações de arquivos externos (se existirem)
-    try:
-        init_db()
-        executar_migracao_v3()
-        executar_migracao_v4()
-        executar_migracao_v5()
-        executar_migracao_v6()
-    except Exception as e:
-        logger.error(f"Erro nas migrações externas: {e}")
-
     # 2. FORÇA A CRIAÇÃO DE TODAS AS COLUNAS FALTANTES (TODAS AS VERSÕES)
     try:
         with engine.connect() as conn:
@@ -1041,11 +985,13 @@ class PixCreateRequest(BaseModel):
 # =========================================================
 # 1. GERAÇÃO DE PIX (COM LIMPEZA DE DADOS)
 # =========================================================
+# =========================================================
+# 1. GERAÇÃO DE PIX (COM LIMPEZA)
+# =========================================================
 @app.post("/api/pagamento/pix")
 def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
     try:
         logger.info(f"💰 Iniciando pagamento para: {data.first_name} (R$ {data.valor})")
-
         bot_atual = db.query(Bot).filter(Bot.id == data.bot_id).first()
         pushin_token = bot_atual.pushin_token if bot_atual else None
         
@@ -1053,39 +999,23 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
             config_sys = db.query(SystemConfig).filter(SystemConfig.key == "pushin_pay_token").first()
             pushin_token = config_sys.value if (config_sys and config_sys.value) else os.getenv("PUSHIN_PAY_TOKEN")
 
-        # 🔥 PADRONIZAÇÃO DE DADOS (CRUCIAL PARA O RESGATE)
-        # Se o user digitar "@Usuario", salvamos "usuario" para bater certo depois
         user_clean = str(data.username).strip().lower().replace("@", "") if data.username else "anonimo"
-        
-        # O ID que vamos salvar. Se vier numérico, ótimo. Se não, salvamos o user_clean no lugar.
-        tid_raw = str(data.telegram_id).strip()
-        tid_clean = tid_raw if tid_raw.isdigit() else user_clean
+        tid_clean = str(data.telegram_id).strip()
+        if not tid_clean.isdigit(): tid_clean = user_clean
 
-        # --- MODO TESTE (SEM TOKEN) ---
         if not pushin_token:
             fake_txid = str(uuid.uuid4())
             novo_pedido = Pedido(
-                bot_id=data.bot_id,
-                telegram_id=tid_clean, 
-                first_name=data.first_name,
-                username=user_clean,   
-                valor=data.valor,
-                status='pending',
-                plano_id=data.plano_id,
-                plano_nome=data.plano_nome,
-                txid=fake_txid,
-                qr_code="pix-fake-copia-cola", 
-                transaction_id=fake_txid,
-                tem_order_bump=data.tem_order_bump
+                bot_id=data.bot_id, telegram_id=tid_clean, first_name=data.first_name, username=user_clean,   
+                valor=data.valor, status='pending', plano_id=data.plano_id, plano_nome=data.plano_nome,
+                txid=fake_txid, qr_code="pix-fake-copia-cola", transaction_id=fake_txid, tem_order_bump=data.tem_order_bump
             )
             db.add(novo_pedido)
             db.commit()
             return {"txid": fake_txid, "copia_cola": "pix-fake", "qr_code": "https://fake.com/qr.png"}
 
-        # --- MODO REAL (PUSHIN PAY) ---
         url = "https://api.pushinpay.com.br/api/pix/cashIn"
         headers = { "Authorization": f"Bearer {pushin_token}", "Content-Type": "application/json", "Accept": "application/json" }
-        
         domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-testes-production.up.railway.app")
         if domain.startswith("https://"): domain = domain.replace("https://", "")
         
@@ -1096,7 +1026,6 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
         }
 
         req = requests.post(url, json=payload, headers=headers)
-        
         if req.status_code in [200, 201]:
             resp = req.json()
             txid = str(resp.get('id') or resp.get('txid'))
@@ -1104,37 +1033,24 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
             qr_image = resp.get('qr_code_image_url') or resp.get('qr_code')
 
             novo_pedido = Pedido(
-                bot_id=data.bot_id,
-                telegram_id=tid_clean,
-                first_name=data.first_name,
-                username=user_clean,
-                valor=data.valor,
-                status='pending',
-                plano_id=data.plano_id,
-                plano_nome=data.plano_nome,
-                txid=txid,
-                qr_code=qr_image,
-                transaction_id=txid,
-                tem_order_bump=data.tem_order_bump
+                bot_id=data.bot_id, telegram_id=tid_clean, first_name=data.first_name, username=user_clean,
+                valor=data.valor, status='pending', plano_id=data.plano_id, plano_nome=data.plano_nome,
+                txid=txid, qr_code=qr_image, transaction_id=txid, tem_order_bump=data.tem_order_bump
             )
             db.add(novo_pedido)
             db.commit()
-
             return {"txid": txid, "copia_cola": copia_cola, "qr_code": qr_image}
         else:
             logger.error(f"Erro PushinPay: {req.text}")
             raise HTTPException(status_code=400, detail="Erro Gateway")
-
     except Exception as e:
         logger.error(f"Erro fatal PIX: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/pagamento/status/{txid}")
-def verificar_status_pix(txid: str, db: Session = Depends(get_db)):
-    pedido = db.query(Pedido).filter(Pedido.txid == txid).first()
-    if not pedido:
-        raise HTTPException(status_code=404, detail="Pedido não encontrado")
-    
+def check_status(txid: str, db: Session = Depends(get_db)):
+    pedido = db.query(Pedido).filter((Pedido.txid == txid) | (Pedido.transaction_id == txid)).first()
+    if not pedido: return {"status": "not_found"}
     return {"status": pedido.status}
 
 # =========================================================
@@ -1915,26 +1831,6 @@ def switch_bot_mode(bot_id: int, dados: BotModeUpdate, db: Session = Depends(get
             
     return {"status": "ok", "msg": f"Modo alterado para {dados.modo}"}
 
-# 1. Obter Configuração Completa (Usado pelo Frontend da Loja)
-@app.get("/api/miniapp/{bot_id}")
-def get_miniapp_data(bot_id: int, db: Session = Depends(get_db)):
-    # Busca Config
-    config = db.query(MiniAppConfig).filter(MiniAppConfig.bot_id == bot_id).first()
-    if not config:
-        # Retorna padrão se não existir
-        config = {
-            "background_value": "#000000",
-            "hero_title": "ACERVO PREMIUM",
-            "enable_popup": False
-        }
-    
-    # Busca Categorias
-    cats = db.query(MiniAppCategory).filter(MiniAppCategory.bot_id == bot_id).all()
-    
-    return {
-        "config": config,
-        "categories": cats
-    }
 
 # 2. Salvar Configuração Global
 @app.post("/api/admin/bots/{bot_id}/miniapp/config")
@@ -2438,148 +2334,191 @@ def enviar_passo_automatico(bot_temp, chat_id, passo_atual, bot_db, db):
         logger.error(f"Erro no passo automático {passo_atual.step_order}: {e}")
 
 # =========================================================
-# 🚀 WEBHOOK GERAL (PORTEIRO + BUMP + HTML + BTN CHECK STATUS)
-# =========================================================
-# =========================================================
-# 🚀 WEBHOOK GERAL (PORTEIRO + BUMP + HTML + MENUS + TRACKING)
+# 3. WEBHOOK TELEGRAM (START + GATEKEEPER + COMANDOS)
 # =========================================================
 @app.post("/webhook/{token}")
 async def receber_update_telegram(token: str, req: Request, db: Session = Depends(get_db)):
     if token == "pix": return {"status": "ignored"}
     
     bot_db = db.query(Bot).filter(Bot.token == token).first()
-    if not bot_db: return {"status": "ignored"}
+    if not bot_db or bot_db.status == "pausado": return {"status": "ignored"}
 
     try:
         body = await req.json()
         update = telebot.types.Update.de_json(body)
         bot_temp = telebot.TeleBot(token)
-        
         message = update.message if update.message else None
         
-        # ==========================================
-        # 🟢 LÓGICA DO COMANDO /START
-        # ==========================================
+        # ----------------------------------------
+        # 🚪 1. O PORTEIRO (GATEKEEPER)
+        # ----------------------------------------
+        if message and message.new_chat_members:
+            chat_id = str(message.chat.id)
+            canal_vip_id = str(bot_db.id_canal_vip).replace(" ", "").strip()
+            
+            if chat_id == canal_vip_id:
+                for member in message.new_chat_members:
+                    if member.is_bot: continue
+                    
+                    # Verifica pagamento
+                    pedido = db.query(Pedido).filter(
+                        Pedido.bot_id == bot_db.id,
+                        Pedido.telegram_id == str(member.id),
+                        Pedido.status.in_(['paid', 'approved'])
+                    ).order_by(desc(Pedido.created_at)).first()
+                    
+                    allowed = False
+                    if pedido:
+                        if pedido.data_expiracao:
+                            if datetime.utcnow() < pedido.data_expiracao: allowed = True
+                        elif pedido.plano_nome:
+                            nm = pedido.plano_nome.lower()
+                            if "vital" in nm or "mega" in nm or "eterno" in nm: allowed = True
+                            else:
+                                d = 30
+                                if "diario" in nm or "24" in nm: d = 1
+                                elif "semanal" in nm: d = 7
+                                elif "trimestral" in nm: d = 90
+                                elif "anual" in nm: d = 365
+                                if pedido.created_at and datetime.utcnow() < (pedido.created_at + timedelta(days=d)): allowed = True
+                    
+                    if not allowed:
+                        try:
+                            bot_temp.ban_chat_member(chat_id, member.id)
+                            bot_temp.unban_chat_member(chat_id, member.id)
+                            try: bot_temp.send_message(member.id, "🚫 <b>Acesso Negado.</b>\nPor favor, realize o pagamento.", parse_mode="HTML")
+                            except: pass
+                        except: pass
+            return {"status": "checked"}
+
+        # ----------------------------------------
+        # 👋 2. COMANDOS (/start, /suporte, /status)
+        # ----------------------------------------
         if message and message.text:
             chat_id = message.chat.id
             txt = message.text.lower().strip()
             
+            # --- /SUPORTE ---
+            if txt == "/suporte":
+                if bot_db.suporte_username:
+                    sup = bot_db.suporte_username.replace("@", "")
+                    bot_temp.send_message(chat_id, f"💬 <b>Falar com Suporte:</b>\n\n👉 @{sup}", parse_mode="HTML")
+                else: bot_temp.send_message(chat_id, "⚠️ Nenhum suporte definido.")
+                return {"status": "ok"}
+
+            # --- /STATUS ---
+            if txt == "/status":
+                pedido = db.query(Pedido).filter(
+                    Pedido.bot_id == bot_db.id,
+                    Pedido.telegram_id == str(chat_id),
+                    Pedido.status.in_(['paid', 'approved'])
+                ).order_by(desc(Pedido.created_at)).first()
+                
+                if pedido:
+                    validade = "VITALÍCIO ♾️"
+                    if pedido.data_expiracao:
+                        if datetime.utcnow() > pedido.data_expiracao:
+                            bot_temp.send_message(chat_id, "❌ <b>Assinatura expirada!</b>", parse_mode="HTML")
+                            return {"status": "ok"}
+                        validade = pedido.data_expiracao.strftime("%d/%m/%Y")
+                    bot_temp.send_message(chat_id, f"✅ <b>Assinatura Ativa!</b>\n\n💎 Plano: {pedido.plano_nome}\n📅 Vence em: {validade}", parse_mode="HTML")
+                else: bot_temp.send_message(chat_id, "❌ <b>Nenhuma assinatura ativa.</b>", parse_mode="HTML")
+                return {"status": "ok"}
+
+            # --- /START ---
             if txt == "/start" or txt.startswith("/start "):
                 first_name = message.from_user.first_name
-                # Pega username e normaliza (sem @, minusculo)
                 username_raw = message.from_user.username
                 username_clean = str(username_raw).lower().replace("@", "").strip() if username_raw else ""
-                
                 user_id_str = str(chat_id)
                 
-                # ----------------------------------------------------
-                # 🔥 RECUPERAÇÃO DE VENDAS (A LÓGICA QUE FALTAVA)
-                # ----------------------------------------------------
-                # Busca pedidos PAGOS mas NÃO ENTREGUES (mensagem_enviada=False)
-                pendentes = db.query(Pedido).filter(
+                # 🔥 RECUPERAÇÃO DE VENDAS
+                filtros_recuperacao = [
                     Pedido.bot_id == bot_db.id,
                     Pedido.status.in_(['paid', 'approved']),
                     Pedido.mensagem_enviada == False
-                ).all()
+                ]
+                pendentes = db.query(Pedido).filter(*filtros_recuperacao).all()
+                pedidos_resgate = []
                 
-                if pendentes:
-                    logger.info(f"🔍 Verificando {len(pendentes)} pedidos pendentes para: {username_clean} ou ID {user_id_str}")
+                for p in pendentes:
+                    db_user = str(p.username or "").lower().replace("@", "").strip()
+                    db_id = str(p.telegram_id or "").strip()
+                    match = False
+                    if username_clean and db_user == username_clean: match = True
+                    if db_id == user_id_str: match = True
+                    if username_clean and db_id.lower().replace("@","") == username_clean: match = True
                     
-                    for p in pendentes:
-                        # Normaliza dados do banco
-                        db_user = str(p.username or "").lower().replace("@", "").strip()
-                        db_id = str(p.telegram_id or "").strip()
-                        
-                        match = False
-                        
-                        # 1. Match exato de Username
-                        if username_clean and db_user == username_clean: match = True
-                        # 2. Match de ID (caso tenha salvo certo mas falhou envio)
-                        if db_id == user_id_str: match = True
-                        # 3. Match Cruzado (Username salvo no campo ID)
-                        if username_clean and db_id.lower().replace("@","") == username_clean: match = True
-                        
-                        if match:
-                            logger.info(f"✅ Pedido {p.id} ENCONTRADO! Recuperando...")
-                            
-                            # Atualiza ID Real e Marca Enviado
-                            p.telegram_id = user_id_str
-                            p.mensagem_enviada = True
-                            db.commit()
-                            
-                            # Entrega o Produto
-                            try:
-                                canal_str = str(bot_db.id_canal_vip).strip()
-                                canal_id = int(canal_str) if canal_str.lstrip('-').isdigit() else canal_str
-                                
-                                try: bot_temp.unban_chat_member(canal_id, chat_id)
-                                except: pass
-                                
-                                convite = bot_temp.create_chat_invite_link(
-                                    chat_id=canal_id, 
-                                    member_limit=1, 
-                                    name=f"Recup {first_name}"
-                                )
-                                
-                                msg_recuperada = f"🎉 <b>Pagamento Localizado!</b>\n\nDesculpe a demora. Aqui está seu acesso:\n👉 {convite.invite_link}"
-                                bot_temp.send_message(chat_id, msg_recuperada, parse_mode="HTML")
-                            except Exception as e_rec:
-                                logger.error(f"Erro entrega rec: {e_rec}")
-                                bot_temp.send_message(chat_id, "✅ Pagamento confirmado! Tente entrar no canal agora.")
+                    if match: pedidos_resgate.append(p)
 
-                # ----------------------------------------------------
-                # RESTO DO FLUXO (LEAD, TRACKING, MENSAGEM)
-                # ----------------------------------------------------
-                
-                # Salva Lead
+                if pedidos_resgate:
+                    logger.info(f"🚑 RECUPERANDO {len(pedidos_resgate)} vendas para {first_name}")
+                    for p in pedidos_resgate:
+                        p.telegram_id = user_id_str
+                        p.mensagem_enviada = True
+                        db.commit()
+                        try:
+                            canal_str = str(bot_db.id_canal_vip).strip()
+                            canal_id = int(canal_str) if canal_str.lstrip('-').isdigit() else canal_str
+                            try: bot_temp.unban_chat_member(canal_id, chat_id)
+                            except: pass
+                            convite = bot_temp.create_chat_invite_link(chat_id=canal_id, member_limit=1, name=f"Recup {first_name}")
+                            msg_rec = f"🎉 <b>Pagamento Encontrado!</b>\n\nAqui está seu link:\n👉 {convite.invite_link}"
+                            bot_temp.send_message(chat_id, msg_rec, parse_mode="HTML")
+                        except Exception as e_rec:
+                            logger.error(f"Erro rec: {e_rec}")
+                            bot_temp.send_message(chat_id, "✅ Pagamento confirmado! Tente entrar no canal.")
+
+                # Tracking
+                track_id = None
+                parts = txt.split()
+                if len(parts) > 1:
+                    code = parts[1]
+                    tl = db.query(TrackingLink).filter(TrackingLink.codigo == code).first()
+                    if tl: 
+                        tl.clicks += 1
+                        track_id = tl.id
+                        db.commit()
+
+                # Lead
                 try:
-                    # Simulação da sua função criar_ou_atualizar_lead
                     lead = db.query(Lead).filter(Lead.user_id == user_id_str, Lead.bot_id == bot_db.id).first()
                     if not lead:
-                        lead = Lead(user_id=user_id_str, nome=first_name, username=username_raw, bot_id=bot_db.id)
+                        lead = Lead(user_id=user_id_str, nome=first_name, username=username_raw, bot_id=bot_db.id, tracking_id=track_id)
                         db.add(lead)
                     db.commit()
                 except: pass
 
-                # Envia Mensagem de Boas Vindas (Mini App ou Padrão)
+                # Envio Menu
                 flow = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
                 modo = getattr(flow, 'start_mode', 'padrao') if flow else 'padrao'
                 msg_txt = flow.msg_boas_vindas if flow else "Olá!"
                 media = flow.media_url if flow else None
                 
                 mk = types.InlineKeyboardMarkup()
-                
                 if modo == "miniapp" and flow and flow.miniapp_url:
                     url = flow.miniapp_url.replace("http://", "https://")
-                    mk.add(types.InlineKeyboardButton(
-                        text=flow.miniapp_btn_text or "ABRIR LOJA 🛍️", 
-                        web_app=types.WebAppInfo(url=url)
-                    ))
+                    mk.add(types.InlineKeyboardButton(text=flow.miniapp_btn_text or "ABRIR LOJA 🛍️", web_app=types.WebAppInfo(url=url)))
                 else:
                     if flow and flow.mostrar_planos_1:
                         planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_db.id).all()
-                        for pl in planos:
-                            mk.add(types.InlineKeyboardButton(f"💎 {pl.nome_exibicao}", callback_data=f"checkout_{pl.id}"))
+                        for pl in planos: mk.add(types.InlineKeyboardButton(f"💎 {pl.nome_exibicao}", callback_data=f"checkout_{pl.id}"))
                     else:
                         btn = flow.btn_text_1 if flow else "Ver Conteúdo"
                         mk.add(types.InlineKeyboardButton(btn, callback_data="step_1"))
 
                 try:
                     if media:
-                        if media.endswith(('.mp4', '.mov')):
-                            bot_temp.send_video(chat_id, media, caption=msg_txt, reply_markup=mk, parse_mode="HTML")
-                        else:
-                            bot_temp.send_photo(chat_id, media, caption=msg_txt, reply_markup=mk, parse_mode="HTML")
-                    else:
-                        bot_temp.send_message(chat_id, msg_txt, reply_markup=mk, parse_mode="HTML")
-                except:
-                    bot_temp.send_message(chat_id, msg_txt, reply_markup=mk)
+                        if media.endswith(('.mp4', '.mov')): bot_temp.send_video(chat_id, media, caption=msg_txt, reply_markup=mk, parse_mode="HTML")
+                        else: bot_temp.send_photo(chat_id, media, caption=msg_txt, reply_markup=mk, parse_mode="HTML")
+                    else: bot_temp.send_message(chat_id, msg_txt, reply_markup=mk, parse_mode="HTML")
+                except: bot_temp.send_message(chat_id, msg_txt, reply_markup=mk)
 
                 return {"status": "ok"}
 
-        # ============================================================
+        # ----------------------------------------
         # 🎮 3. CALLBACKS (BOTÕES)
-        # ============================================================
+        # ----------------------------------------
         elif update.callback_query:
             try: 
                 if not update.callback_query.data.startswith("check_payment_"):
@@ -2638,7 +2577,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 plano = db.query(PlanoConfig).filter(PlanoConfig.id == plano_id).first()
                 if not plano: return {"status": "error"}
 
-                # 🔥 BUSCA O LEAD PARA PEGAR O RASTREAMENTO
                 lead_origem = db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first()
                 track_id_pedido = lead_origem.tracking_id if lead_origem else None
 
@@ -2675,7 +2613,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             bot_id=bot_db.id, telegram_id=str(chat_id), first_name=first_name, username=username,
                             plano_nome=plano.nome_exibicao, plano_id=plano.id, valor=plano.preco_atual,
                             transaction_id=txid, qr_code=qr, status="pending", tem_order_bump=False, created_at=datetime.utcnow(),
-                            tracking_id=track_id_pedido # 🔥 SALVA NO PEDIDO
+                            tracking_id=track_id_pedido
                         )
                         db.add(novo_pedido)
                         db.commit()
@@ -2686,15 +2624,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         markup_pix = types.InlineKeyboardMarkup()
                         markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS DO PAGAMENTO", callback_data=f"check_payment_{txid}"))
 
-                        msg_pix = f"""🌟 Seu pagamento foi gerado com sucesso:
-🎁 Plano: <b>{plano.nome_exibicao}</b>
-💰 Valor: <b>R$ {plano.preco_atual:.2f}</b>
-🔐 Pague via Pix Copia e Cola:
-
-<pre>{qr}</pre>
-
-👆 Toque na chave PIX acima para copiá-la
-‼️ Após o pagamento, o acesso será liberado automaticamente!"""
+                        msg_pix = f"🌟 Seu pagamento foi gerado com sucesso:\n🎁 Plano: <b>{plano.nome_exibicao}</b>\n💰 Valor: <b>R$ {plano.preco_atual:.2f}</b>\n🔐 Pague via Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n👆 Toque na chave PIX acima para copiá-la\n‼️ Após o pagamento, o acesso será liberado automaticamente!"
                         
                         bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
                     else:
@@ -2706,7 +2636,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 pid = data.split("_")[2]
                 plano = db.query(PlanoConfig).filter(PlanoConfig.id == pid).first()
                 
-                # 🔥 BUSCA O LEAD PARA PEGAR O RASTREAMENTO
                 lead_origem = db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first()
                 track_id_pedido = lead_origem.tracking_id if lead_origem else None
 
@@ -2734,7 +2663,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         bot_id=bot_db.id, telegram_id=str(chat_id), first_name=first_name, username=username,
                         plano_nome=nome_final, plano_id=plano.id, valor=valor_final,
                         transaction_id=txid, qr_code=qr, status="pending", tem_order_bump=aceitou, created_at=datetime.utcnow(),
-                        tracking_id=track_id_pedido # 🔥 SALVA NO PEDIDO
+                        tracking_id=track_id_pedido
                     )
                     db.add(novo_pedido)
                     db.commit()
@@ -2745,15 +2674,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     markup_pix = types.InlineKeyboardMarkup()
                     markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS DO PAGAMENTO", callback_data=f"check_payment_{txid}"))
 
-                    msg_pix = f"""🌟 Seu pagamento foi gerado com sucesso:
-🎁 Plano: <b>{nome_final}</b>
-💰 Valor: <b>R$ {valor_final:.2f}</b>
-🔐 Pague via Pix Copia e Cola:
-
-<pre>{qr}</pre>
-
-👆 Toque na chave PIX acima para copiá-la
-‼️ Após o pagamento, o acesso será liberado automaticamente!"""
+                    msg_pix = f"🌟 Seu pagamento foi gerado com sucesso:\n🎁 Plano: <b>{nome_final}</b>\n💰 Valor: <b>R$ {valor_final:.2f}</b>\n🔐 Pague via Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n👆 Toque na chave PIX acima para copiá-la\n‼️ Após o pagamento, o acesso será liberado automaticamente!"
 
                     bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
 
@@ -2766,10 +2687,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 
                 if not campanha:
                     bot_temp.send_message(chat_id, "❌ Oferta não encontrada ou expirada.")
-                
                 elif campanha.expiration_at and datetime.utcnow() > campanha.expiration_at:
                     bot_temp.send_message(chat_id, "🚫 <b>OFERTA ENCERRADA!</b>\n\nO tempo desta oferta acabou.", parse_mode="HTML")
-                
                 else:
                     plano = db.query(PlanoConfig).filter(PlanoConfig.id == campanha.plano_id).first()
                     if plano:
@@ -2786,7 +2705,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                 bot_id=bot_db.id, telegram_id=str(chat_id), first_name=first_name, username=username,
                                 plano_nome=f"{plano.nome_exibicao} (OFERTA)", plano_id=plano.id, valor=preco_final,
                                 transaction_id=txid, qr_code=qr, status="pending", tem_order_bump=False, created_at=datetime.utcnow(),
-                                tracking_id=None # Promos não costumam ter tracking de link externo, mas de campanha
+                                tracking_id=None 
                             )
                             db.add(novo_pedido)
                             db.commit()
@@ -2797,15 +2716,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             markup_pix = types.InlineKeyboardMarkup()
                             markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS DO PAGAMENTO", callback_data=f"check_payment_{txid}"))
 
-                            msg_pix = f"""🌟 Seu pagamento foi gerado com sucesso:
-🎁 Plano: <b>{plano.nome_exibicao}</b>
-💰 Valor Promocional: <b>R$ {preco_final:.2f}</b>
-🔐 Pague via Pix Copia e Cola:
-
-<pre>{qr}</pre>
-
-👆 Toque na chave PIX acima para copiá-la
-‼️ Após o pagamento, o acesso será liberado automaticamente!"""
+                            msg_pix = f"🌟 Seu pagamento foi gerado com sucesso:\n🎁 Plano: <b>{plano.nome_exibicao}</b>\n💰 Valor Promocional: <b>R$ {preco_final:.2f}</b>\n🔐 Pague via Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n👆 Toque na chave PIX acima para copiá-la\n‼️ Após o pagamento, o acesso será liberado automaticamente!"
 
                             bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
                         else:
@@ -4141,6 +4052,66 @@ def update_profile(data: ProfileUpdate, db: Session = Depends(get_db)):
     except Exception as e:
         logger.error(f"Erro ao atualizar perfil: {e}")
         raise HTTPException(status_code=500, detail="Erro ao salvar perfil")
+
+# =========================================================
+# 🛒 ROTA PÚBLICA PARA O MINI APP (ESSA É A CORRETA ✅)
+# =========================================================
+@app.get("/api/miniapp/{bot_id}")
+def get_miniapp_config(bot_id: int, db: Session = Depends(get_db)):
+    # Busca configurações visuais
+    config = db.query(MiniAppConfig).filter(MiniAppConfig.bot_id == bot_id).first()
+    # Busca categorias
+    cats = db.query(MiniAppCategory).filter(MiniAppCategory.bot_id == bot_id).all()
+    # Busca fluxo (para saber link e texto do botão)
+    flow = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
+    
+    # Se não tiver config, retorna padrão para não quebrar o front
+    start_mode = getattr(flow, 'start_mode', 'padrao') if flow else 'padrao'
+    
+    if not config:
+        return {
+            "config": {
+                "hero_title": "Loja VIP", 
+                "background_value": "#000000",
+                "start_mode": start_mode
+            },
+            "categories": [],
+            "flow": {"start_mode": start_mode}
+        }
+
+    return {
+        "config": config,
+        "categories": cats,
+        "flow": {
+            "start_mode": start_mode,
+            "miniapp_url": getattr(flow, 'miniapp_url', ''),
+            "miniapp_btn_text": getattr(flow, 'miniapp_btn_text', 'ABRIR LOJA')
+        }
+    }
+
+# =========================================================
+# ⚙️ STARTUP OTIMIZADA (SEM MIGRAÇÕES REPETIDAS)
+# =========================================================
+@app.on_event("startup")
+def on_startup():
+    print("Starting Container - Zenyx")
+    
+    # 1. Cria tabelas básicas se não existirem
+    try:
+        init_db()
+    except Exception as e:
+        logger.error(f"Erro no init_db: {e}")
+
+    # 2. Migrações (COMENTADAS PARA NÃO RODAR TODA HORA)
+    # Descomente apenas se criar uma tabela nova no futuro
+    # try:
+    #     executar_migracao_v3()
+    #     executar_migracao_v4()
+    #     executar_migracao_v5()
+    #     executar_migracao_v6()
+    # except: pass
+    
+    logger.info("✅ Sistema Iniciado e Pronto!")
 
 @app.get("/")
 def home():
