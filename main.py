@@ -2323,6 +2323,9 @@ def enviar_passo_automatico(bot_temp, chat_id, passo_atual, bot_db, db):
 # =========================================================
 # 3. WEBHOOK TELEGRAM (START + GATEKEEPER + COMANDOS)
 # =========================================================
+# =========================================================
+# 3. WEBHOOK TELEGRAM (START + GATEKEEPER + COMANDOS)
+# =========================================================
 @app.post("/webhook/{token}")
 async def receber_update_telegram(token: str, req: Request, db: Session = Depends(get_db)):
     if token == "pix": return {"status": "ignored"}
@@ -2493,16 +2496,22 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 media = flow.media_url if flow else None
                 
                 mk = types.InlineKeyboardMarkup()
+                
+                # SE FOR MINI APP
                 if modo == "miniapp" and flow and flow.miniapp_url:
                     url = flow.miniapp_url.replace("http://", "https://")
                     mk.add(types.InlineKeyboardButton(text=flow.miniapp_btn_text or "ABRIR LOJA 🛍️", web_app=types.WebAppInfo(url=url)))
+                
+                # SE FOR PADRÃO (AQUI ESTÁ A CORREÇÃO DOS PREÇOS ✅)
                 else:
                     if flow and flow.mostrar_planos_1:
                         planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_db.id).all()
-                        for pl in planos: mk.add(types.InlineKeyboardButton(f"💎 {pl.nome_exibicao}", callback_data=f"checkout_{pl.id}"))
-                    else:
-                        btn = flow.btn_text_1 if flow else "Ver Conteúdo"
-                        mk.add(types.InlineKeyboardButton(btn, callback_data="step_1"))
+                        for pl in planos: 
+                            # Formata preço igual ao seu outro projeto
+                            preco_txt = f"R$ {pl.preco_atual:.2f}".replace('.', ',')
+                            mk.add(types.InlineKeyboardButton(f"💎 {pl.nome_exibicao} - {preco_txt}", callback_data=f"checkout_{pl.id}"))
+                    else: 
+                        mk.add(types.InlineKeyboardButton(flow.btn_text_1 if flow else "Ver Conteúdo", callback_data="step_1"))
 
                 try:
                     if media:
