@@ -2462,7 +2462,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     bot_temp.send_message(chat_id, "❌ <b>Nenhuma assinatura ativa encontrada.</b>\nDigite /start para ver os planos.", parse_mode="HTML")
                 return {"status": "ok"}
 
-            # --- COMANDO /START (COM RASTREAMENTO) ---
+            # --- COMANDO /START (COM RASTREAMENTO + WEB APP) ---
             if txt == "/start" or txt.startswith("/start "):
                 first_name = message.from_user.first_name
                 username = message.from_user.username
@@ -2485,26 +2485,51 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
 
                 # Salva Lead com Tracking
                 try:
+                    # Se você usa uma função auxiliar, mantém ela. Se não, usa a lógica direta.
+                    # Mantendo a chamada original do seu código para não quebrar referências:
                     criar_ou_atualizar_lead(db, str(chat_id), first_name, username, bot_db.id, tracking_id_found)
                 except Exception as e_lead:
                     logger.error(f"Erro ao salvar lead: {e_lead}")
 
                 # Fluxo
-                fluxo = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
-                msg_texto = fluxo.msg_boas_vindas if fluxo else "Olá! Seja bem-vindo."
-                msg_media = fluxo.media_url if fluxo else None
-                mostrar_planos_1 = fluxo.mostrar_planos_1 if fluxo else False
-
-                markup = types.InlineKeyboardMarkup()
+                flow = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
                 
-                if mostrar_planos_1:
-                    planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_db.id).all()
-                    for p in planos:
-                        markup.add(types.InlineKeyboardButton(f"💎 {p.nome_exibicao} - R$ {p.preco_atual:.2f}", callback_data=f"checkout_{p.id}"))
-                else:
-                    btn_txt = fluxo.btn_text_1 if (fluxo and fluxo.btn_text_1) else "🔓 VER CONTEÚDO"
-                    markup.add(types.InlineKeyboardButton(btn_txt, callback_data="step_1"))
+                # Textos padrão
+                msg_texto = flow.msg_boas_vindas if flow and flow.msg_boas_vindas else "Olá! Seja bem-vindo."
+                msg_media = flow.media_url if flow else None
+                
+                # --- 🕵️‍♂️ VERIFICA O MODO DE INÍCIO (NOVO) ---
+                # Verifica se existe o atributo 'start_mode' (compatibilidade) e qual o valor
+                modo = getattr(flow, 'start_mode', 'padrao') if flow else 'padrao'
+                
+                markup = types.InlineKeyboardMarkup()
 
+                # 🔥 MODO WEB APP: O Segredo da Identificação Automática
+                if modo == "miniapp" and flow.miniapp_url:
+                    url_final = flow.miniapp_url
+                    # Garante HTTPS (Obrigatório para Web App)
+                    if not url_final.startswith("https://"):
+                        url_final = url_final.replace("http://", "https://")
+                    
+                    btn_web = types.InlineKeyboardButton(
+                        text=flow.miniapp_btn_text or "ABRIR LOJA 🛍️",
+                        web_app=types.WebAppInfo(url=url_final) # 👈 Isso injeta os dados do usuário no site
+                    )
+                    markup.add(btn_web)
+                
+                # 🛡️ MODO PADRÃO (Botões Normais)
+                else:
+                    mostrar_planos_1 = flow.mostrar_planos_1 if flow else False
+                    
+                    if mostrar_planos_1:
+                        planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_db.id).all()
+                        for p in planos:
+                            markup.add(types.InlineKeyboardButton(f"💎 {p.nome_exibicao} - R$ {p.preco_atual:.2f}", callback_data=f"checkout_{p.id}"))
+                    else:
+                        btn_txt = flow.btn_text_1 if (flow and flow.btn_text_1) else "🔓 VER CONTEÚDO"
+                        markup.add(types.InlineKeyboardButton(btn_txt, callback_data="step_1"))
+
+                # Envio da Mensagem
                 try:
                     if msg_media:
                         if msg_media.lower().endswith(('.mp4', '.mov')):
@@ -2513,7 +2538,9 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             bot_temp.send_photo(chat_id, msg_media, caption=msg_texto, reply_markup=markup, parse_mode="HTML")
                     else:
                         bot_temp.send_message(chat_id, msg_texto, reply_markup=markup, parse_mode="HTML")
-                except:
+                except Exception as e_send:
+                    logger.error(f"Erro envio mensagem start: {e_send}")
+                    # Fallback simples sem HTML se der erro de formatação
                     bot_temp.send_message(chat_id, msg_texto, reply_markup=markup)
 
                 return {"status": "ok"}

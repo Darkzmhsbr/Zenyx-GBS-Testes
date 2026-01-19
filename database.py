@@ -56,9 +56,8 @@ class Bot(Base):
     
     status = Column(String, default="ativo")
     
-    # 👇👇 ADICIONADO: Token Individual por Bot
+    # Token Individual por Bot
     pushin_token = Column(String, nullable=True) 
-    # 👆👆 -----------------------------------
 
     created_at = Column(DateTime, default=datetime.utcnow)
     
@@ -161,7 +160,7 @@ class RemarketingCampaign(Base):
     data_envio = Column(DateTime, default=datetime.utcnow)
 
 # =========================================================
-# 💬 FLUXO (ESTRUTURA HÍBRIDA V1 + V2)
+# 💬 FLUXO (ESTRUTURA HÍBRIDA V1 + V2 + MINI APP)
 # =========================================================
 class BotFlow(Base):
     __tablename__ = "bot_flows"
@@ -169,7 +168,13 @@ class BotFlow(Base):
     bot_id = Column(Integer, ForeignKey("bots.id"), unique=True)
     bot = relationship("Bot", back_populates="fluxo")
     
-    # Passo 1 (Fixo)
+    # --- CONFIGURAÇÃO DE MODO DE INÍCIO (NOVO) ---
+    start_mode = Column(String, default="padrao") # 'padrao', 'miniapp'
+    miniapp_url = Column(String, nullable=True)
+    miniapp_btn_text = Column(String, default="ABRIR LOJA 🛍️")
+    # ---------------------------------------------
+
+    # Passo 1 (Fixo - Modo Padrão)
     msg_boas_vindas = Column(Text, default="Olá! Bem-vindo.")
     media_url = Column(String, nullable=True)
     btn_text_1 = Column(String, default="🔓 DESBLOQUEAR")
