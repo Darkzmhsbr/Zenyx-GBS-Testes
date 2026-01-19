@@ -2491,14 +2491,13 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     bot_temp.send_message(chat_id, "❌ <b>Nenhuma assinatura ativa encontrada.</b>\nDigite /start para ver os planos.", parse_mode="HTML")
                 return {"status": "ok"}
 
-            # --- COMANDO /START (COM RASTREAMENTO + LÓGICA MINI APP) ---
+            # --- COMANDO /START (COM RASTREAMENTO + LÓGICA HÍBRIDA) ---
             if txt == "/start" or txt.startswith("/start "):
                 first_name = message.from_user.first_name
                 username = message.from_user.username
                 
-                # 🔥 LÓGICA DE TRACKING
+                # 1. RASTREAMENTO (TRACKING)
                 tracking_id_found = None
-                
                 parts = txt.split()
                 if len(parts) > 1:
                     tracking_code = parts[1]
@@ -2511,45 +2510,51 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         db.commit()
                         logger.info(f"🎯 Tracking detectado: {tracking_code} (+1 click)")
 
-                # Salva Lead
+                # 2. SALVAR LEAD
                 try:
                     criar_ou_atualizar_lead(db, str(chat_id), first_name, username, bot_db.id, tracking_id_found)
                 except Exception as e_lead:
                     logger.error(f"Erro ao salvar lead: {e_lead}")
 
-                # Carrega Fluxo Configurado
+                # 3. CARREGAR FLUXO E MODO
                 flow = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
                 
-                # Textos Padrão
+                # Define Modo (padrão se não existir)
+                modo_atual = getattr(flow, 'start_mode', 'padrao') if flow else 'padrao'
+                logger.info(f"🤖 [START] Bot {bot_db.id} ({bot_db.nome}) iniciou em modo: {modo_atual.upper()}")
+
+                # Textos
                 msg_texto = flow.msg_boas_vindas if (flow and flow.msg_boas_vindas) else "Olá! Seja bem-vindo."
                 msg_media = flow.media_url if flow else None
-                
-                # --- 🕵️‍♂️ VERIFICA O MODO DE INÍCIO ---
-                # Se não tiver o campo no banco (ainda), assume 'padrao'
-                modo = getattr(flow, 'start_mode', 'padrao') if flow else 'padrao'
                 
                 markup = types.InlineKeyboardMarkup()
 
                 # ====================================================
-                # 🛑 SEPARAÇÃO DE FLUXOS (AQUI ESTÁ A CORREÇÃO)
+                # 🚦 DIVISÃO DE ÁGUAS (AQUI É O PULO DO GATO)
                 # ====================================================
                 
-                # 🅰️ MODO MINI APP (WEB APP)
-                if modo == "miniapp" and flow and flow.miniapp_url:
-                    url_final = flow.miniapp_url
-                    # Garante HTTPS
-                    if not url_final.startswith("https://"):
-                        url_final = url_final.replace("http://", "https://")
+                if modo_atual == "miniapp" and flow and flow.miniapp_url:
+                    # [MODO A] MINI APP / LOJA
+                    # Apenas 1 botão que abre o WebApp
                     
-                    # Cria botão especial WebApp
-                    btn_web = types.InlineKeyboardButton(
-                        text=flow.miniapp_btn_text or "ABRIR LOJA 🛍️",
-                        web_app=types.WebAppInfo(url=url_final)
-                    )
-                    markup.add(btn_web)
+                    url_loja = flow.miniapp_url
+                    # Corrige HTTP -> HTTPS (Obrigatório para WebApp)
+                    if not url_loja.startswith("https://"):
+                        url_loja = url_loja.replace("http://", "https://")
+                        
+                    texto_btn = flow.miniapp_btn_text or "ABRIR LOJA 🛍️"
+                    
+                    logger.info(f"📱 Gerando botão MiniApp: {texto_btn} -> {url_loja}")
+                    
+                    markup.add(types.InlineKeyboardButton(
+                        text=texto_btn,
+                        web_app=types.WebAppInfo(url=url_loja)
+                    ))
                 
-                # 🅱️ MODO PADRÃO (BOTÕES NORMAIS)
                 else:
+                    # [MODO B] PADRÃO (Botões de Callback)
+                    logger.info("🔘 Gerando botões padrão (Callback)")
+                    
                     mostrar_planos_1 = flow.mostrar_planos_1 if flow else False
                     
                     if mostrar_planos_1:
@@ -2560,7 +2565,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         btn_txt = flow.btn_text_1 if (flow and flow.btn_text_1) else "🔓 VER CONTEÚDO"
                         markup.add(types.InlineKeyboardButton(btn_txt, callback_data="step_1"))
 
-                # Envio da Mensagem Final
+                # 4. ENVIO DA MENSAGEM
                 try:
                     if msg_media:
                         if msg_media.lower().endswith(('.mp4', '.mov')):
@@ -2570,7 +2575,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     else:
                         bot_temp.send_message(chat_id, msg_texto, reply_markup=markup, parse_mode="HTML")
                 except Exception as e_send:
-                    # Fallback sem HTML se der erro de formatação
+                    logger.error(f"Erro envio mensagem start: {e_send}")
+                    # Fallback sem HTML
                     bot_temp.send_message(chat_id, msg_texto, reply_markup=markup)
 
                 return {"status": "ok"}
