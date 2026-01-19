@@ -2491,7 +2491,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     bot_temp.send_message(chat_id, "❌ <b>Nenhuma assinatura ativa encontrada.</b>\nDigite /start para ver os planos.", parse_mode="HTML")
                 return {"status": "ok"}
 
-            # --- COMANDO /START (COM RASTREAMENTO + WEB APP) ---
+            # --- COMANDO /START (COM RASTREAMENTO + LÓGICA MINI APP) ---
             if txt == "/start" or txt.startswith("/start "):
                 first_name = message.from_user.first_name
                 username = message.from_user.username
@@ -2502,7 +2502,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 parts = txt.split()
                 if len(parts) > 1:
                     tracking_code = parts[1]
-                    
                     track_link = db.query(TrackingLink).filter(TrackingLink.codigo == tracking_code).first()
                     
                     if track_link:
@@ -2512,41 +2511,44 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         db.commit()
                         logger.info(f"🎯 Tracking detectado: {tracking_code} (+1 click)")
 
-                # Salva Lead com Tracking
+                # Salva Lead
                 try:
-                    # Se você usa uma função auxiliar, mantém ela. Se não, usa a lógica direta.
-                    # Mantendo a chamada original do seu código para não quebrar referências:
                     criar_ou_atualizar_lead(db, str(chat_id), first_name, username, bot_db.id, tracking_id_found)
                 except Exception as e_lead:
                     logger.error(f"Erro ao salvar lead: {e_lead}")
 
-                # Fluxo
+                # Carrega Fluxo Configurado
                 flow = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
                 
-                # Textos padrão
-                msg_texto = flow.msg_boas_vindas if flow and flow.msg_boas_vindas else "Olá! Seja bem-vindo."
+                # Textos Padrão
+                msg_texto = flow.msg_boas_vindas if (flow and flow.msg_boas_vindas) else "Olá! Seja bem-vindo."
                 msg_media = flow.media_url if flow else None
                 
-                # --- 🕵️‍♂️ VERIFICA O MODO DE INÍCIO (NOVO) ---
-                # Verifica se existe o atributo 'start_mode' (compatibilidade) e qual o valor
+                # --- 🕵️‍♂️ VERIFICA O MODO DE INÍCIO ---
+                # Se não tiver o campo no banco (ainda), assume 'padrao'
                 modo = getattr(flow, 'start_mode', 'padrao') if flow else 'padrao'
                 
                 markup = types.InlineKeyboardMarkup()
 
-                # 🔥 MODO WEB APP: O Segredo da Identificação Automática
-                if modo == "miniapp" and flow.miniapp_url:
+                # ====================================================
+                # 🛑 SEPARAÇÃO DE FLUXOS (AQUI ESTÁ A CORREÇÃO)
+                # ====================================================
+                
+                # 🅰️ MODO MINI APP (WEB APP)
+                if modo == "miniapp" and flow and flow.miniapp_url:
                     url_final = flow.miniapp_url
-                    # Garante HTTPS (Obrigatório para Web App)
+                    # Garante HTTPS
                     if not url_final.startswith("https://"):
                         url_final = url_final.replace("http://", "https://")
                     
+                    # Cria botão especial WebApp
                     btn_web = types.InlineKeyboardButton(
                         text=flow.miniapp_btn_text or "ABRIR LOJA 🛍️",
-                        web_app=types.WebAppInfo(url=url_final) # 👈 Isso injeta os dados do usuário no site
+                        web_app=types.WebAppInfo(url=url_final)
                     )
                     markup.add(btn_web)
                 
-                # 🛡️ MODO PADRÃO (Botões Normais)
+                # 🅱️ MODO PADRÃO (BOTÕES NORMAIS)
                 else:
                     mostrar_planos_1 = flow.mostrar_planos_1 if flow else False
                     
@@ -2558,7 +2560,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         btn_txt = flow.btn_text_1 if (flow and flow.btn_text_1) else "🔓 VER CONTEÚDO"
                         markup.add(types.InlineKeyboardButton(btn_txt, callback_data="step_1"))
 
-                # Envio da Mensagem
+                # Envio da Mensagem Final
                 try:
                     if msg_media:
                         if msg_media.lower().endswith(('.mp4', '.mov')):
@@ -2568,8 +2570,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     else:
                         bot_temp.send_message(chat_id, msg_texto, reply_markup=markup, parse_mode="HTML")
                 except Exception as e_send:
-                    logger.error(f"Erro envio mensagem start: {e_send}")
-                    # Fallback simples sem HTML se der erro de formatação
+                    # Fallback sem HTML se der erro de formatação
                     bot_temp.send_message(chat_id, msg_texto, reply_markup=markup)
 
                 return {"status": "ok"}
