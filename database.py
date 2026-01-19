@@ -51,10 +51,15 @@ class Bot(Base):
     id_canal_vip = Column(String)
     admin_principal_id = Column(String, nullable=True)
     
-    # 🔥 [NOVO] Username do Suporte
+    # 🔥 Username do Suporte
     suporte_username = Column(String, nullable=True)
     
     status = Column(String, default="ativo")
+    
+    # 👇👇 ADICIONADO: Token Individual por Bot
+    pushin_token = Column(String, nullable=True) 
+    # 👆👆 -----------------------------------
+
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # --- RELACIONAMENTOS (CASCADE) ---
@@ -74,7 +79,7 @@ class Bot(Base):
     # Relacionamento com Tracking (Links pertencem a um bot)
     tracking_links = relationship("TrackingLink", back_populates="bot", cascade="all, delete-orphan")
 
-    # 🔥 [NOVO] Relacionamento com Mini App (Template Personalizável)
+    # 🔥 Relacionamento com Mini App (Template Personalizável)
     miniapp_config = relationship("MiniAppConfig", uselist=False, back_populates="bot", cascade="all, delete-orphan")
     miniapp_categories = relationship("MiniAppCategory", back_populates="bot", cascade="all, delete-orphan")
 
@@ -201,7 +206,7 @@ class BotFlowStep(Base):
     bot = relationship("Bot", back_populates="steps")
 
 # =========================================================
-# 🔗 TRACKING (RASTREAMENTO DE LINKS) 🔥 NOVO
+# 🔗 TRACKING (RASTREAMENTO DE LINKS)
 # =========================================================
 class TrackingFolder(Base):
     __tablename__ = "tracking_folders"
@@ -281,7 +286,7 @@ class Pedido(Base):
     
     origem = Column(String(50), default='bot')
     
-    # 🔥 [NOVO] Rastreamento
+    # Rastreamento
     tracking_id = Column(Integer, ForeignKey("tracking_links.id"), nullable=True)
 
 
@@ -311,11 +316,11 @@ class Lead(Base):
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
-    # 🔥 [NOVO] Rastreamento
+    # Rastreamento
     tracking_id = Column(Integer, ForeignKey("tracking_links.id"), nullable=True)
 
 # =========================================================
-# 📱 MINI APP (TEMPLATE PERSONALIZÁVEL) 🔥 NOVO
+# 📱 MINI APP (TEMPLATE PERSONALIZÁVEL)
 # =========================================================
 
 # 1. Configuração Visual Global
@@ -345,7 +350,6 @@ class MiniAppConfig(Base):
     bot = relationship("Bot", back_populates="miniapp_config")
 
 # 2. Categorias e Conteúdo
-# 2. Categorias e Conteúdo
 class MiniAppCategory(Base):
     __tablename__ = "miniapp_categories"
     id = Column(Integer, primary_key=True, index=True)
@@ -366,7 +370,7 @@ class MiniAppCategory(Base):
     footer_banner_url = Column(String, nullable=True)
     deco_lines_url = Column(String, nullable=True)
     
-    # 🔥 NOVAS CORES DE TEXTO
+    # NOVAS CORES DE TEXTO
     model_name_color = Column(String, default="#ffffff")
     model_desc_color = Column(String, default="#cccccc")
     # --------------------

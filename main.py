@@ -317,7 +317,7 @@ def on_startup():
                 "ALTER TABLE leads ADD COLUMN IF NOT EXISTS tracking_id INTEGER REFERENCES tracking_links(id);",
                 "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS tracking_id INTEGER REFERENCES tracking_links(id);",
 
-                # --- [CORREÇÃO 8] 🔥 TABELAS DA LOJA (MINI APP) - ADICIONADO AGORA ---
+                # --- [CORREÇÃO 8] 🔥 TABELAS DA LOJA (MINI APP) ---
                 """
                 CREATE TABLE IF NOT EXISTS miniapp_config (
                     bot_id INTEGER PRIMARY KEY REFERENCES bots(id),
@@ -351,10 +351,9 @@ def on_startup():
                     footer_banner_url VARCHAR,
                     content_json TEXT
                 );
-                """
                 """,
-                """
-                # --- [CORREÇÃO 9] NOVAS COLUNAS PARA CATEGORIA RICA (BASEADO NO PDF) ---
+
+                # --- [CORREÇÃO 9] NOVAS COLUNAS PARA CATEGORIA RICA ---
                 "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS bg_color VARCHAR DEFAULT '#000000';",
                 "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS banner_desk_url VARCHAR;",
                 "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS video_preview_url VARCHAR;",
@@ -363,6 +362,9 @@ def on_startup():
                 "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS model_desc TEXT;",
                 "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS footer_banner_url VARCHAR;",
                 "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS deco_lines_url VARCHAR;",
+
+                # --- [CORREÇÃO 10] TOKEN PUSHINPAY POR BOT (NOVO) ---
+                "ALTER TABLE bots ADD COLUMN IF NOT EXISTS pushin_token VARCHAR;"
             ]
             
             
@@ -568,47 +570,55 @@ def notificar_admin_principal(bot_db: Bot, mensagem: str):
 # =========================================================
 
 # Modelo para receber o JSON do frontend
+# =========================================================
+# 🔌 ROTAS DE INTEGRAÇÃO (AGORA POR BOT)
+# =========================================================
+
+# Modelo para receber o JSON do frontend
 class IntegrationUpdate(BaseModel):
     token: str
 
-@app.get("/api/admin/integrations/pushinpay")
-def get_pushin_status(db: Session = Depends(get_db)):
-    # Busca token no banco
-    config = db.query(SystemConfig).filter(SystemConfig.key == "pushin_pay_token").first()
+@app.get("/api/admin/integrations/pushinpay/{bot_id}")
+def get_pushin_status(bot_id: int, db: Session = Depends(get_db)):
+    # Busca o BOT específico
+    bot = db.query(Bot).filter(Bot.id == bot_id).first()
     
-    # Se não achar no banco, tenta variável de ambiente (backup)
-    token = config.value if config else os.getenv("PUSHIN_PAY_TOKEN")
+    if not bot:
+        return {"status": "erro", "msg": "Bot não encontrado"}
     
+    token = bot.pushin_token
+    
+    # Fallback: Se não tiver no bot, tenta pegar o global antigo
+    if not token:
+        config = db.query(SystemConfig).filter(SystemConfig.key == "pushin_pay_token").first()
+        token = config.value if config else None
+
     if not token:
         return {"status": "desconectado", "token_mask": ""}
     
-    # Cria máscara para segurança (ex: "abc1...890")
+    # Cria máscara para segurança
     mask = f"{token[:4]}...{token[-4:]}" if len(token) > 8 else "****"
     return {"status": "conectado", "token_mask": mask}
 
-@app.post("/api/admin/integrations/pushinpay")
-def save_pushin_token(data: IntegrationUpdate, db: Session = Depends(get_db)):
-    # 1. Busca ou Cria a configuração
-    config = db.query(SystemConfig).filter(SystemConfig.key == "pushin_pay_token").first()
-    if not config:
-        config = SystemConfig(key="pushin_pay_token")
-        db.add(config)
+@app.post("/api/admin/integrations/pushinpay/{bot_id}")
+def save_pushin_token(bot_id: int, data: IntegrationUpdate, db: Session = Depends(get_db)):
+    # 1. Busca o Bot
+    bot = db.query(Bot).filter(Bot.id == bot_id).first()
+    if not bot:
+        raise HTTPException(status_code=404, detail="Bot não encontrado")
     
-    # 2. Limpa espaços em branco acidentais
+    # 2. Limpa e Salva NO BOT
     token_limpo = data.token.strip()
     
-    # 3. Validação básica
     if len(token_limpo) < 10:
         return {"status": "erro", "msg": "Token muito curto ou inválido."}
 
-    # 4. Salva
-    config.value = token_limpo
-    config.updated_at = datetime.utcnow()
+    bot.pushin_token = token_limpo
     db.commit()
     
-    logger.info(f"🔑 Token PushinPay atualizado: {token_limpo[:5]}...")
+    logger.info(f"🔑 Token PushinPay atualizado para o BOT {bot.nome}: {token_limpo[:5]}...")
     
-    return {"status": "conectado", "msg": "Integração salva com sucesso!"}
+    return {"status": "conectado", "msg": f"Integração salva para {bot.nome}!"}
 
 # --- MODELOS ---
 class BotCreate(BaseModel):
@@ -961,13 +971,17 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
     try:
         logger.info(f"💰 Iniciando pagamento para: {data.first_name} (R$ {data.valor})")
 
-        # 1. Busca Token do PushinPay
-        config_sys = db.query(SystemConfig).first()
-        # Tenta pegar token do banco ou do ambiente
-        pushin_token = config_sys.pushinpay_token if (config_sys and config_sys.pushinpay_token) else os.getenv("PUSHIN_PAY_TOKEN")
+        # 1. Busca Token DO BOT (Prioridade Total)
+        bot_atual = db.query(Bot).filter(Bot.id == data.bot_id).first()
+        pushin_token = bot_atual.pushin_token if bot_atual else None
+
+        # Fallback (Segurança): Se o bot não tiver, tenta o global
+        if not pushin_token:
+            config_sys = db.query(SystemConfig).filter(SystemConfig.key == "pushin_pay_token").first()
+            pushin_token = config_sys.value if (config_sys and config_sys.value) else os.getenv("PUSHIN_PAY_TOKEN")
 
         if not pushin_token:
-            # MODO DE TESTE (Se não tiver token configurado)
+            # MODO DE TESTE (Se não tiver token configurado em lugar nenhum)
             logger.warning("⚠️ Token PushinPay não encontrado. Gerando PIX simulado.")
             fake_txid = str(uuid.uuid4())
             # QR Code fake para teste
