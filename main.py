@@ -1376,26 +1376,98 @@ def listar_bots(db: Session = Depends(get_db)):
 # 💎 PLANOS & FLUXO
 # ===========================
 
-# 🔥 [CORRIGIDO] Rota ajustada para coincidir com o api.js (/bots/{id}/plans)
-@app.post("/api/admin/bots/{bot_id}/plans")
-def criar_plano(bot_id: int, plano: PlanoCreate, db: Session = Depends(get_db)):
-    novo_plano = PlanoConfig(
-        bot_id=bot_id, # Usa o ID da URL ou do corpo (garante integridade)
-        key_id=f"plan_{bot_id}_{plano.dias_duracao}d",
-        nome_exibicao=plano.nome_exibicao,
-        descricao=f"Acesso de {plano.dias_duracao} dias",
-        preco_cheio=plano.preco * 2,
-        preco_atual=plano.preco,
-        dias_duracao=plano.dias_duracao
-    )
-    db.add(novo_plano)
-    db.commit()
-    return {"status": "ok"}
+# =========================================================
+# 💲 GERENCIAMENTO DE PLANOS (CRUD COMPLETO)
+# =========================================================
 
-# 🔥 [CORRIGIDO] Rota ajustada para coincidir com o api.js (/bots/{id}/plans)
+# 1. LISTAR PLANOS
+# =========================================================
+# 💎 GERENCIAMENTO DE PLANOS (CORRIGIDO E UNIFICADO)
+# =========================================================
+
+# 1. LISTAR PLANOS
 @app.get("/api/admin/bots/{bot_id}/plans")
-def listar_planos(bot_id: int, db: Session = Depends(get_db)):
-    return db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
+def list_plans(bot_id: int, db: Session = Depends(get_db)):
+    planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
+    return planos
+
+# 2. CRIAR PLANO
+@app.post("/api/admin/bots/{bot_id}/plans")
+async def create_plan(bot_id: int, req: Request, db: Session = Depends(get_db)):
+    try:
+        data = await req.json()
+        logger.info(f"📝 Criando plano para Bot {bot_id}: {data}")
+        
+        novo_plano = PlanoConfig(
+            bot_id=bot_id,
+            nome_exibicao=data.get("nome_exibicao", "Novo Plano"),
+            descricao=data.get("descricao", ""),
+            preco_atual=float(data.get("preco_atual", 0.0)),
+            preco_original=float(data.get("preco_original", 0.0)),
+            dias_duracao=int(data.get("dias_duracao", 30))
+        )
+        
+        db.add(novo_plano)
+        db.commit()
+        db.refresh(novo_plano)
+        return novo_plano
+    except Exception as e:
+        logger.error(f"Erro ao criar plano: {e}")
+        raise HTTPException(status_code=500, detail="Erro interno ao criar plano.")
+
+# 3. EDITAR PLANO (ROTA UNIFICADA)
+@app.put("/api/admin/bots/{bot_id}/plans/{plano_id}")
+async def update_plan(bot_id: int, plano_id: int, req: Request, db: Session = Depends(get_db)):
+    try:
+        data = await req.json()
+        logger.info(f"✏️ Editando plano {plano_id} do Bot {bot_id}: {data}")
+        
+        plano = db.query(PlanoConfig).filter(
+            PlanoConfig.id == plano_id, 
+            PlanoConfig.bot_id == bot_id
+        ).first()
+        
+        if not plano:
+            raise HTTPException(status_code=404, detail="Plano não encontrado.")
+            
+        # Atualiza campos se existirem no payload
+        if "nome_exibicao" in data: plano.nome_exibicao = data["nome_exibicao"]
+        if "descricao" in data: plano.descricao = data["descricao"]
+        if "preco_atual" in data: plano.preco_atual = float(data["preco_atual"])
+        if "preco_original" in data: plano.preco_original = float(data["preco_original"])
+        if "dias_duracao" in data: plano.dias_duracao = int(data["dias_duracao"])
+        
+        db.commit()
+        db.refresh(plano)
+        return plano
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        logger.error(f"Erro ao editar plano: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# 4. DELETAR PLANO (COM SEGURANÇA)
+@app.delete("/api/admin/bots/{bot_id}/plans/{plano_id}")
+def delete_plan(bot_id: int, plano_id: int, db: Session = Depends(get_db)):
+    try:
+        plano = db.query(PlanoConfig).filter(
+            PlanoConfig.id == plano_id, 
+            PlanoConfig.bot_id == bot_id
+        ).first()
+        
+        if not plano:
+            raise HTTPException(status_code=404, detail="Plano não encontrado.")
+            
+        # Desvincula de campanhas e pedidos para evitar erro de integridade
+        db.query(RemarketingCampaign).filter(RemarketingCampaign.plano_id == plano_id).update({RemarketingCampaign.plano_id: None})
+        db.query(Pedido).filter(Pedido.plano_id == plano_id).update({Pedido.plano_id: None})
+        
+        db.delete(plano)
+        db.commit()
+        return {"status": "deleted"}
+    except Exception as e:
+        logger.error(f"Erro ao deletar plano: {e}")
+        raise HTTPException(status_code=500, detail="Erro ao deletar plano.")
 
 # =========================================================
 # 🛒 ORDER BUMP API
@@ -1493,10 +1565,14 @@ def atualizar_plano(plan_id: int, dados: PlanoUpdate, db: Session = Depends(get_
     db.refresh(plano)
     return {"status": "success", "msg": "Plano atualizado"}
 
+# =========================================================
+# 💬 FLUXO DO BOT (V2)
+# =========================================================
 @app.get("/api/admin/bots/{bot_id}/flow")
 def obter_fluxo(bot_id: int, db: Session = Depends(get_db)):
     fluxo = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
     if not fluxo:
+        # Retorna padrão se não existir
         return {
             "msg_boas_vindas": "Olá! Seja bem-vindo(a).",
             "media_url": "",
@@ -1505,37 +1581,51 @@ def obter_fluxo(bot_id: int, db: Session = Depends(get_db)):
             "msg_2_texto": "Escolha seu plano abaixo:",
             "msg_2_media": "",
             "mostrar_planos_2": True,
-            "mostrar_planos_1": False # Padrão
+            "mostrar_planos_1": False,
+            "start_mode": "padrao",
+            "miniapp_url": "",
+            "miniapp_btn_text": "ABRIR LOJA"
         }
     return fluxo
+
+class FlowUpdate(BaseModel):
+    msg_boas_vindas: Optional[str] = None
+    media_url: Optional[str] = None
+    btn_text_1: Optional[str] = None
+    autodestruir_1: Optional[bool] = False
+    msg_2_texto: Optional[str] = None
+    msg_2_media: Optional[str] = None
+    mostrar_planos_2: Optional[bool] = True
+    mostrar_planos_1: Optional[bool] = False
+    start_mode: Optional[str] = "padrao"
+    miniapp_url: Optional[str] = None
+    miniapp_btn_text: Optional[str] = None
 
 @app.post("/api/admin/bots/{bot_id}/flow")
 def salvar_fluxo(bot_id: int, flow: FlowUpdate, db: Session = Depends(get_db)):
     fluxo_db = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
     
-    # Cria registro se não existir
     if not fluxo_db:
         fluxo_db = BotFlow(bot_id=bot_id)
         db.add(fluxo_db)
     
-    # Atualiza campos existentes
-    fluxo_db.msg_boas_vindas = flow.msg_boas_vindas
-    fluxo_db.media_url = flow.media_url
-    fluxo_db.btn_text_1 = flow.btn_text_1
-    fluxo_db.autodestruir_1 = flow.autodestruir_1
-    fluxo_db.msg_2_texto = flow.msg_2_texto
-    fluxo_db.msg_2_media = flow.msg_2_media
-    fluxo_db.mostrar_planos_2 = flow.mostrar_planos_2
-    fluxo_db.mostrar_planos_1 = flow.mostrar_planos_1
+    # Atualiza campos básicos
+    if flow.msg_boas_vindas is not None: fluxo_db.msg_boas_vindas = flow.msg_boas_vindas
+    if flow.media_url is not None: fluxo_db.media_url = flow.media_url
+    if flow.btn_text_1 is not None: fluxo_db.btn_text_1 = flow.btn_text_1
+    if flow.autodestruir_1 is not None: fluxo_db.autodestruir_1 = flow.autodestruir_1
+    if flow.msg_2_texto is not None: fluxo_db.msg_2_texto = flow.msg_2_texto
+    if flow.msg_2_media is not None: fluxo_db.msg_2_media = flow.msg_2_media
+    if flow.mostrar_planos_2 is not None: fluxo_db.mostrar_planos_2 = flow.mostrar_planos_2
+    if flow.mostrar_planos_1 is not None: fluxo_db.mostrar_planos_1 = flow.mostrar_planos_1
     
-    # 🔥 GRAVA OS NOVOS CAMPOS NO BANCO
+    # Atualiza campos do Mini App
     if flow.start_mode: fluxo_db.start_mode = flow.start_mode
     if flow.miniapp_url is not None: fluxo_db.miniapp_url = flow.miniapp_url
     if flow.miniapp_btn_text: fluxo_db.miniapp_btn_text = flow.miniapp_btn_text
     
     db.commit()
-    logger.info(f"💾 Fluxo do Bot {bot_id} atualizado! Modo: {fluxo_db.start_mode}")
-    
+    logger.info(f"💾 Fluxo do Bot {bot_id} salvo com sucesso.")
     return {"status": "saved"}
 
 # =========================================================
@@ -3235,10 +3325,6 @@ def del_step(bot_id: int, sid: int, db: Session = Depends(get_db)):
         db.commit()
     return {"status": "deleted"}
 
-# --- ROTA DE REENVIO INDIVIDUAL (VIA HISTÓRICO) ---
-# =========================================================
-# FUNÇÃO DE BACKGROUND (VERSÃO FORÇA BRUTA - UPDATE EXPLÍCITO)
-# =========================================================
 # =========================================================
 # FUNÇÃO DE BACKGROUND (CORRIGIDA: SESSÃO INDEPENDENTE)
 # =========================================================
