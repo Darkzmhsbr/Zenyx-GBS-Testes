@@ -1014,6 +1014,17 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
             config_sys = db.query(SystemConfig).filter(SystemConfig.key == "pushin_pay_token").first()
             pushin_token = config_sys.value if (config_sys and config_sys.value) else os.getenv("PUSHIN_PAY_TOKEN")
 
+        # ============================================================
+        # 🔥 PREPARAÇÃO DE DADOS (NORMALIZAÇÃO PARA FACILITAR RECUPERAÇÃO)
+        # ============================================================
+        # Remove espaços, @ e deixa tudo minúsculo para salvar padronizado
+        user_clean = str(data.username).strip().lower().replace("@", "") if data.username else "anonimo"
+        tid_clean = str(data.telegram_id).strip()
+
+        # Se o ID não for numérico (veio do campo manual como texto), assume que é igual ao username limpo
+        if not tid_clean.isdigit():
+            tid_clean = user_clean
+
         if not pushin_token:
             # MODO DE TESTE (Se não tiver token configurado em lugar nenhum)
             logger.warning("⚠️ Token PushinPay não encontrado. Gerando PIX simulado.")
@@ -1025,9 +1036,9 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
             # Cria o pedido no banco
             novo_pedido = Pedido(
                 bot_id=data.bot_id,
-                telegram_id=data.telegram_id,
+                telegram_id=tid_clean, # 🔥 Salva ID limpo
                 first_name=data.first_name,
-                username=data.username,
+                username=user_clean,   # 🔥 Salva User limpo
                 valor=data.valor,
                 status='pending',
                 plano_id=data.plano_id,
@@ -1035,7 +1046,8 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
                 txid=fake_txid,
                 qr_code=fake_qr_image, 
                 transaction_id=fake_txid,
-                link_acesso="" 
+                link_acesso="",
+                tem_order_bump=data.tem_order_bump
             )
             db.add(novo_pedido)
             db.commit()
@@ -1061,37 +1073,38 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
         payload = {
             "value": int(data.valor * 100), # Centavos
             "webhook_url": f"https://{domain}/webhook/pix",
-            "external_reference": f"bot_{data.bot_id}_user_{data.telegram_id}_{int(time.time())}"
+            "external_reference": f"bot_{data.bot_id}_{user_clean}_{int(time.time())}"
         }
 
         req = requests.post(url, json=payload, headers=headers)
         
         if req.status_code == 200 or req.status_code == 201:
             resp = req.json()
-            txid = resp.get('id') or resp.get('txid')
+            txid = str(resp.get('id') or resp.get('txid'))
             copia_cola = resp.get('qr_code_text') or resp.get('pixCopiaEcola')
             qr_image = resp.get('qr_code_image_url') or resp.get('qr_code')
 
             # Salva Pedido
             novo_pedido = Pedido(
                 bot_id=data.bot_id,
-                telegram_id=data.telegram_id,
+                telegram_id=tid_clean, # 🔥 Salva ID limpo
                 first_name=data.first_name,
-                username=data.username,
+                username=user_clean,   # 🔥 Salva User limpo
                 valor=data.valor,
                 status='pending',
                 plano_id=data.plano_id,
                 plano_nome=data.plano_nome,
-                txid=str(txid),
+                txid=txid,
                 qr_code=qr_image,
-                transaction_id=str(txid),
-                link_acesso=""
+                transaction_id=txid,
+                link_acesso="",
+                tem_order_bump=data.tem_order_bump
             )
             db.add(novo_pedido)
             db.commit()
 
             return {
-                "txid": str(txid),
+                "txid": txid,
                 "copia_cola": copia_cola,
                 "qr_code": qr_image
             }
@@ -2484,7 +2497,10 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 
                 # 🔥 1. RECUPERAÇÃO DE VENDAS (A SALVAÇÃO!)
                 # Procura pedidos pagos que ainda não foram entregues (mensagem_enviada = False)
-                # Tenta casar pelo Username (com ou sem @) ou pelo Primeiro Nome
+                # Tenta casar pelo Username (com ou sem @) ou pelo ID Numérico
+                
+                # Normaliza username atual para busca (remove @ e espaços)
+                current_user_clean = str(username).lower().replace("@", "").strip() if username else ""
                 
                 filtros_recuperacao = [
                     Pedido.bot_id == bot_db.id,
@@ -2492,31 +2508,33 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     Pedido.mensagem_enviada == False
                 ]
                 
-                # Monta query dinâmica
-                query_base = db.query(Pedido).filter(*filtros_recuperacao)
-                
+                # Busca TODOS os pendentes de entrega deste bot
+                candidatos = db.query(Pedido).filter(*filtros_recuperacao).all()
                 pedidos_resgate = []
                 
-                # Tentativa 1: Pelo Username (Se tiver)
-                if username:
-                    p_user = query_base.filter(
-                        (Pedido.username == username) | 
-                        (Pedido.username == f"@{username}") |
-                        (Pedido.telegram_id == f"@{username}") # Caso tenha salvo o ID como @user
-                    ).all()
-                    pedidos_resgate.extend(p_user)
-                
-                # Tentativa 2: Pelo ID Numérico (Caso já tenha salvo certo mas falhou o envio)
-                p_id = query_base.filter(Pedido.telegram_id == user_id_str).all()
-                pedidos_resgate.extend(p_id)
-
-                # Remove duplicatas
-                pedidos_unicos = {p.id: p for p in pedidos_resgate}.values()
-
-                if pedidos_unicos:
-                    logger.info(f"🚑 RECUPERANDO {len(pedidos_unicos)} vendas para {first_name} (ID Real: {user_id_str})")
+                for p in candidatos:
+                    # Normaliza o que está no banco
+                    db_user = str(p.username or "").lower().replace("@", "").strip()
+                    db_id = str(p.telegram_id or "").strip()
                     
-                    for p in pedidos_unicos:
+                    match = False
+                    
+                    # A) Bate ID Numérico? (Caso o ID tenha sido salvo certo mas falhou o envio)
+                    if db_id == user_id_str: match = True
+                    
+                    # B) Bate Username? (Caso tenha salvo pelo user manual)
+                    elif current_user_clean and db_user == current_user_clean: match = True
+                    
+                    # C) Bate Username no campo ID? (Erro comum de salvar user no lugar do ID)
+                    elif current_user_clean and db_id.lower().replace("@","") == current_user_clean: match = True
+                    
+                    if match:
+                        pedidos_resgate.append(p)
+
+                if pedidos_resgate:
+                    logger.info(f"🚑 RECUPERANDO {len(pedidos_resgate)} vendas para {first_name} (ID Real: {user_id_str})")
+                    
+                    for p in pedidos_resgate:
                         # Atualiza com o ID Real (Agora podemos enviar mensagem!)
                         p.telegram_id = user_id_str
                         p.mensagem_enviada = True # Marca como enviado para não repetir
@@ -2552,12 +2570,13 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         track_link.clicks += 1
                         track_link.leads += 1
                         db.commit()
+                        logger.info(f"🎯 Tracking detectado: {tracking_code} (+1 click)")
 
                 # 3. LEAD
                 try:
                     criar_ou_atualizar_lead(db, user_id_str, first_name, username, bot_db.id, tracking_id_found)
                 except Exception as e_lead:
-                    logger.error(f"Erro lead: {e_lead}")
+                    logger.error(f"Erro ao salvar lead: {e_lead}")
 
                 # 4. FLUXO (Mini App ou Padrão)
                 flow = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
@@ -2569,7 +2588,10 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
 
                 if modo_atual == "miniapp" and flow and flow.miniapp_url:
                     # MODO WEB APP
-                    url_loja = flow.miniapp_url.replace("http://", "https://")
+                    url_loja = flow.miniapp_url
+                    if not url_loja.startswith("https://"):
+                        url_loja = url_loja.replace("http://", "https://")
+                        
                     btn_web = types.InlineKeyboardButton(
                         text=flow.miniapp_btn_text or "ABRIR LOJA 🛍️",
                         web_app=types.WebAppInfo(url=url_loja)
@@ -2585,7 +2607,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         btn_txt = flow.btn_text_1 if (flow and flow.btn_text_1) else "🔓 VER CONTEÚDO"
                         markup.add(types.InlineKeyboardButton(btn_txt, callback_data="step_1"))
 
-                # Envio
+                # Envio da Mensagem
                 try:
                     if msg_media:
                         if msg_media.lower().endswith(('.mp4', '.mov')):
@@ -2595,6 +2617,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     else:
                         bot_temp.send_message(chat_id, msg_texto, reply_markup=markup, parse_mode="HTML")
                 except:
+                    # Fallback sem HTML se der erro
                     bot_temp.send_message(chat_id, msg_texto, reply_markup=markup)
 
                 return {"status": "ok"}
