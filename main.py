@@ -1391,29 +1391,59 @@ def list_plans(bot_id: int, db: Session = Depends(get_db)):
     planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
     return planos
 
-# 2. CRIAR PLANO
+# 2. CRIAR PLANO (CORRIGIDO)
 @app.post("/api/admin/bots/{bot_id}/plans")
 async def create_plan(bot_id: int, req: Request, db: Session = Depends(get_db)):
     try:
         data = await req.json()
         logger.info(f"📝 Criando plano para Bot {bot_id}: {data}")
         
+        # Tenta pegar preco_original, se não tiver, usa 0.0
+        preco_orig = float(data.get("preco_original", 0.0))
+        # Se o preço original for 0, define como o dobro do atual (padrão de marketing)
+        if preco_orig == 0:
+            preco_orig = float(data.get("preco_atual", 0.0)) * 2
+
         novo_plano = PlanoConfig(
             bot_id=bot_id,
             nome_exibicao=data.get("nome_exibicao", "Novo Plano"),
-            descricao=data.get("descricao", ""),
+            descricao=data.get("descricao", f"Acesso de {data.get('dias_duracao')} dias"),
             preco_atual=float(data.get("preco_atual", 0.0)),
-            preco_original=float(data.get("preco_original", 0.0)),
-            dias_duracao=int(data.get("dias_duracao", 30))
+            # Tenta usar 'preco_cheio' se 'preco_original' falhar (adaptação ao banco)
+            preco_cheio=preco_orig, 
+            dias_duracao=int(data.get("dias_duracao", 30)),
+            key_id=f"plan_{bot_id}_{int(time.time())}" # Garante chave única
         )
         
         db.add(novo_plano)
         db.commit()
         db.refresh(novo_plano)
         return novo_plano
+
+    except TypeError as te:
+        # Se der erro de coluna inexistente, tenta criar sem o campo problemático
+        logger.warning(f"⚠️ Tentando criar plano sem 'preco_cheio' devido a erro: {te}")
+        db.rollback()
+        try:
+            novo_plano_fallback = PlanoConfig(
+                bot_id=bot_id,
+                nome_exibicao=data.get("nome_exibicao"),
+                descricao=data.get("descricao"),
+                preco_atual=float(data.get("preco_atual")),
+                dias_duracao=int(data.get("dias_duracao")),
+                key_id=f"plan_{bot_id}_{int(time.time())}"
+            )
+            db.add(novo_plano_fallback)
+            db.commit()
+            db.refresh(novo_plano_fallback)
+            return novo_plano_fallback
+        except Exception as e2:
+            logger.error(f"Erro fatal ao criar plano: {e2}")
+            raise HTTPException(status_code=500, detail=str(e2))
+            
     except Exception as e:
-        logger.error(f"Erro ao criar plano: {e}")
-        raise HTTPException(status_code=500, detail="Erro interno ao criar plano.")
+        logger.error(f"Erro genérico ao criar plano: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # 3. EDITAR PLANO (ROTA UNIFICADA)
 @app.put("/api/admin/bots/{bot_id}/plans/{plano_id}")
