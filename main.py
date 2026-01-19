@@ -705,6 +705,11 @@ class FlowUpdate(BaseModel):
     mostrar_planos_2: bool
     mostrar_planos_1: Optional[bool] = False # 🔥 NOVO CAMPO
 
+    # 🔥 NOVOS CAMPOS (ESSENCIAIS PARA O MINI APP)
+    start_mode: Optional[str] = "padrao"
+    miniapp_url: Optional[str] = None
+    miniapp_btn_text: Optional[str] = None
+
 class FlowStepCreate(BaseModel):
     msg_texto: str
     msg_media: Optional[str] = None
@@ -1565,10 +1570,13 @@ def obter_fluxo(bot_id: int, db: Session = Depends(get_db)):
 @app.post("/api/admin/bots/{bot_id}/flow")
 def salvar_fluxo(bot_id: int, flow: FlowUpdate, db: Session = Depends(get_db)):
     fluxo_db = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
+    
+    # Cria registro se não existir
     if not fluxo_db:
         fluxo_db = BotFlow(bot_id=bot_id)
         db.add(fluxo_db)
     
+    # Atualiza campos existentes
     fluxo_db.msg_boas_vindas = flow.msg_boas_vindas
     fluxo_db.media_url = flow.media_url
     fluxo_db.btn_text_1 = flow.btn_text_1
@@ -1576,9 +1584,16 @@ def salvar_fluxo(bot_id: int, flow: FlowUpdate, db: Session = Depends(get_db)):
     fluxo_db.msg_2_texto = flow.msg_2_texto
     fluxo_db.msg_2_media = flow.msg_2_media
     fluxo_db.mostrar_planos_2 = flow.mostrar_planos_2
-    fluxo_db.mostrar_planos_1 = flow.mostrar_planos_1 # Salva o novo campo
+    fluxo_db.mostrar_planos_1 = flow.mostrar_planos_1
+    
+    # 🔥 GRAVA OS NOVOS CAMPOS NO BANCO
+    if flow.start_mode: fluxo_db.start_mode = flow.start_mode
+    if flow.miniapp_url is not None: fluxo_db.miniapp_url = flow.miniapp_url
+    if flow.miniapp_btn_text: fluxo_db.miniapp_btn_text = flow.miniapp_btn_text
     
     db.commit()
+    logger.info(f"💾 Fluxo do Bot {bot_id} atualizado! Modo: {fluxo_db.start_mode}")
+    
     return {"status": "saved"}
 
 # =========================================================
