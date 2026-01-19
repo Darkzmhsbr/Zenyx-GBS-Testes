@@ -228,11 +228,17 @@ def registrar_remarketing(
 # =========================================================
 @app.on_event("startup")
 def on_startup():
-    init_db()
-    executar_migracao_v3()
-    executar_migracao_v4()
-    executar_migracao_v5()  # <--- ADICIONE ESTA LINHA
-    executar_migracao_v6() # <--- ADICIONE AQUI
+    print("Starting Container")
+    
+    # 1. Executa migrações de arquivos externos (se existirem)
+    try:
+        init_db()
+        executar_migracao_v3()
+        executar_migracao_v4()
+        executar_migracao_v5()
+        executar_migracao_v6()
+    except Exception as e:
+        logger.error(f"Erro nas migrações externas: {e}")
 
     # 2. FORÇA A CRIAÇÃO DE TODAS AS COLUNAS FALTANTES (TODAS AS VERSÕES)
     try:
@@ -256,6 +262,8 @@ def on_startup():
                 "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS custom_expiration TIMESTAMP WITHOUT TIME ZONE;",
                 "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS link_acesso VARCHAR;",
                 "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS mensagem_enviada BOOLEAN DEFAULT FALSE;",
+                "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS tem_order_bump BOOLEAN DEFAULT FALSE;", 
+                "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS tracking_id INTEGER;",
 
                 # --- [CORREÇÃO 3] FLUXO DE MENSAGENS ---
                 "ALTER TABLE bot_flows ADD COLUMN IF NOT EXISTS autodestruir_1 BOOLEAN DEFAULT FALSE;",
@@ -283,6 +291,9 @@ def on_startup():
                     msg_texto TEXT,
                     msg_media VARCHAR,
                     btn_texto VARCHAR DEFAULT 'Próximo ▶️',
+                    mostrar_botao BOOLEAN DEFAULT TRUE,
+                    autodestruir BOOLEAN DEFAULT FALSE,
+                    delay_seconds INTEGER DEFAULT 0,
                     created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT now()
                 );
                 """,
@@ -315,7 +326,6 @@ def on_startup():
                 );
                 """,
                 "ALTER TABLE leads ADD COLUMN IF NOT EXISTS tracking_id INTEGER REFERENCES tracking_links(id);",
-                "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS tracking_id INTEGER REFERENCES tracking_links(id);",
 
                 # --- [CORREÇÃO 8] 🔥 TABELAS DA LOJA (MINI APP) ---
                 """
@@ -362,24 +372,43 @@ def on_startup():
                 "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS model_desc TEXT;",
                 "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS footer_banner_url VARCHAR;",
                 "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS deco_lines_url VARCHAR;",
+                "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS model_name_color VARCHAR DEFAULT '#ffffff';",
+                "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS model_desc_color VARCHAR DEFAULT '#cccccc';",
 
-                # --- [CORREÇÃO 10] TOKEN PUSHINPAY POR BOT (NOVO) ---
-                "ALTER TABLE bots ADD COLUMN IF NOT EXISTS pushin_token VARCHAR;"
+                # --- [CORREÇÃO 10] TOKEN PUSHINPAY E ORDER BUMP ---
+                "ALTER TABLE bots ADD COLUMN IF NOT EXISTS pushin_token VARCHAR;",
+                "ALTER TABLE order_bump_config ADD COLUMN IF NOT EXISTS autodestruir BOOLEAN DEFAULT FALSE;",
+
+                # 👇👇👇 [CORREÇÃO 11] SUPORTE A WEB APP NO FLUXO (CRÍTICO) 👇👇👇
+                "ALTER TABLE bot_flows ADD COLUMN IF NOT EXISTS start_mode VARCHAR DEFAULT 'padrao';",
+                "ALTER TABLE bot_flows ADD COLUMN IF NOT EXISTS miniapp_url VARCHAR;",
+                "ALTER TABLE bot_flows ADD COLUMN IF NOT EXISTS miniapp_btn_text VARCHAR DEFAULT 'ABRIR LOJA 🛍️';"
             ]
-            
             
             for cmd in comandos_sql:
                 try:
                     conn.execute(text(cmd))
                     conn.commit()
                 except Exception as e_sql:
-                    # Ignora erro se a coluna já existir (segurança)
-                    logger.warning(f"Aviso SQL: {e_sql}")
+                    # Ignora erro se a coluna já existir (segurança para não parar o deploy)
+                    if "duplicate column" not in str(e_sql) and "already exists" not in str(e_sql):
+                        logger.warning(f"Aviso SQL: {e_sql}")
             
             logger.info("✅ [STARTUP] Banco de dados 100% Verificado!")
             
     except Exception as e:
         logger.error(f"❌ Falha no reparo do banco: {e}")
+
+    # 3. Inicia o Agendador (Scheduler)
+    try:
+        # Se você usa scheduler, inicia aqui
+        if 'scheduler' in globals():
+            scheduler.add_job(verificar_vencimentos, 'interval', hours=12)
+            scheduler.add_job(executar_remarketing, 'interval', minutes=30) 
+            scheduler.start()
+            logger.info("⏰ [STARTUP] Agendador de tarefas iniciado.")
+    except Exception as e:
+        logger.error(f"❌ [STARTUP] Erro no Scheduler: {e}")
 
     # 3. Inicia o Ceifador
     thread = threading.Thread(target=loop_verificar_vencimentos)
