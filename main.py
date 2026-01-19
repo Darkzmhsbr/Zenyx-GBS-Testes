@@ -2483,40 +2483,63 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 user_id_str = str(chat_id)
                 
                 # 🔥 1. RECUPERAÇÃO DE VENDAS (A SALVAÇÃO!)
-                # Se o usuário comprou no site digitando o @username, aqui a gente acha ele!
+                # Procura pedidos pagos que ainda não foram entregues (mensagem_enviada = False)
+                # Tenta casar pelo Username (com ou sem @) ou pelo Primeiro Nome
+                
+                filtros_recuperacao = [
+                    Pedido.bot_id == bot_db.id,
+                    Pedido.status.in_(['paid', 'approved']),
+                    Pedido.mensagem_enviada == False
+                ]
+                
+                # Monta query dinâmica
+                query_base = db.query(Pedido).filter(*filtros_recuperacao)
+                
+                pedidos_resgate = []
+                
+                # Tentativa 1: Pelo Username (Se tiver)
                 if username:
-                    # Busca pedidos PAGOS deste bot, com este username, mas que ainda não receberam a mensagem
-                    pedidos_perdidos = db.query(Pedido).filter(
-                        Pedido.bot_id == bot_db.id,
-                        Pedido.username == username, # Bate pelo Username
-                        Pedido.status.in_(['paid', 'approved']),
-                        Pedido.mensagem_enviada == False
+                    p_user = query_base.filter(
+                        (Pedido.username == username) | 
+                        (Pedido.username == f"@{username}") |
+                        (Pedido.telegram_id == f"@{username}") # Caso tenha salvo o ID como @user
                     ).all()
+                    pedidos_resgate.extend(p_user)
+                
+                # Tentativa 2: Pelo ID Numérico (Caso já tenha salvo certo mas falhou o envio)
+                p_id = query_base.filter(Pedido.telegram_id == user_id_str).all()
+                pedidos_resgate.extend(p_id)
+
+                # Remove duplicatas
+                pedidos_unicos = {p.id: p for p in pedidos_resgate}.values()
+
+                if pedidos_unicos:
+                    logger.info(f"🚑 RECUPERANDO {len(pedidos_unicos)} vendas para {first_name} (ID Real: {user_id_str})")
                     
-                    if pedidos_perdidos:
-                        logger.info(f"🚑 RECUPERANDO {len(pedidos_perdidos)} vendas para {username} (ID Real: {user_id_str})")
+                    for p in pedidos_unicos:
+                        # Atualiza com o ID Real (Agora podemos enviar mensagem!)
+                        p.telegram_id = user_id_str
+                        p.mensagem_enviada = True # Marca como enviado para não repetir
+                        db.commit()
                         
-                        for p in pedidos_perdidos:
-                            # Atualiza com o ID Real (Agora podemos enviar mensagem!)
-                            p.telegram_id = user_id_str
-                            p.mensagem_enviada = True
-                            db.commit()
+                        # Tenta entregar o acesso agora
+                        try:
+                            # Prepara Canal
+                            canal_str = str(bot_db.id_canal_vip).strip()
+                            canal_id = int(canal_str) if canal_str.lstrip('-').isdigit() else canal_str
                             
-                            # Tenta entregar o acesso agora
-                            try:
-                                # Prepara Canal
-                                canal_str = str(bot_db.id_canal_vip).strip()
-                                canal_id = int(canal_str) if canal_str.lstrip('-').isdigit() else canal_str
-                                
-                                # Desbanir e Gerar Link
-                                bot_temp.unban_chat_member(canal_id, chat_id)
-                                convite = bot_temp.create_chat_invite_link(chat_id=canal_id, member_limit=1, name=f"Recuperado {first_name}")
-                                
-                                msg_recuperada = f"✅ <b>Compra Identificada!</b>\n\nEncontramos seu pagamento via site.\nAqui está seu acesso:\n👉 {convite.invite_link}"
-                                bot_temp.send_message(chat_id, msg_recuperada, parse_mode="HTML")
-                            except Exception as e_rec:
-                                logger.error(f"Erro na entrega recuperada: {e_rec}")
-                                bot_temp.send_message(chat_id, "✅ <b>Pagamento Confirmado!</b>\nSeu acesso foi liberado. Tente entrar no canal.")
+                            # Desbanir e Gerar Link
+                            try: bot_temp.unban_chat_member(canal_id, chat_id)
+                            except: pass
+                            
+                            convite = bot_temp.create_chat_invite_link(chat_id=canal_id, member_limit=1, name=f"Recuperado {first_name}")
+                            
+                            msg_recuperada = f"✅ <b>Compra Identificada!</b>\n\nEncontramos seu pagamento.\nAqui está seu acesso:\n👉 {convite.invite_link}"
+                            bot_temp.send_message(chat_id, msg_recuperada, parse_mode="HTML")
+                            logger.info(f"✅ Acesso recuperado enviado para {first_name}")
+                        except Exception as e_rec:
+                            logger.error(f"Erro na entrega recuperada: {e_rec}")
+                            bot_temp.send_message(chat_id, "✅ <b>Pagamento Confirmado!</b>\nSeu acesso foi liberado. Tente entrar no canal.")
 
                 # 2. TRACKING
                 tracking_id_found = None
