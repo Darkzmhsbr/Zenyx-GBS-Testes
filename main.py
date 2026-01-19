@@ -2476,103 +2476,85 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
             chat_id = message.chat.id
             txt = message.text.lower().strip()
             
-            # --- COMANDO /SUPORTE ---
-            if txt == "/suporte":
-                if bot_db.suporte_username:
-                    sup = bot_db.suporte_username.replace("@", "")
-                    bot_temp.send_message(chat_id, f"💬 <b>Falar com Suporte:</b>\n\n👉 @{sup}", parse_mode="HTML")
-                else:
-                    bot_temp.send_message(chat_id, "⚠️ Nenhum suporte definido para este bot.")
-                return {"status": "ok"}
-
-            # --- COMANDO /STATUS ---
-            if txt == "/status":
-                pedido = db.query(Pedido).filter(
-                    Pedido.bot_id == bot_db.id,
-                    Pedido.telegram_id == str(chat_id),
-                    Pedido.status.in_(['paid', 'approved'])
-                ).order_by(desc(Pedido.created_at)).first()
-                
-                if pedido:
-                    validade = "VITALÍCIO ♾️"
-                    if pedido.data_expiracao:
-                        if datetime.utcnow() > pedido.data_expiracao:
-                            bot_temp.send_message(chat_id, "❌ <b>Sua assinatura expirou!</b>\nDigite /start para renovar.", parse_mode="HTML")
-                            return {"status": "ok"}
-                        validade = pedido.data_expiracao.strftime("%d/%m/%Y")
-                    
-                    bot_temp.send_message(chat_id, f"✅ <b>Assinatura Ativa!</b>\n\n💎 Plano: {pedido.plano_nome}\n📅 Vence em: {validade}", parse_mode="HTML")
-                else:
-                    bot_temp.send_message(chat_id, "❌ <b>Nenhuma assinatura ativa encontrada.</b>\nDigite /start para ver os planos.", parse_mode="HTML")
-                return {"status": "ok"}
-
-            # --- COMANDO /START (COM RASTREAMENTO + LÓGICA HÍBRIDA) ---
+            # --- COMANDO /START (COM RASTREAMENTO + RECUPERAÇÃO + MINI APP) ---
             if txt == "/start" or txt.startswith("/start "):
                 first_name = message.from_user.first_name
                 username = message.from_user.username
+                user_id_str = str(chat_id)
                 
-                # 1. RASTREAMENTO (TRACKING)
+                # 🔥 1. RECUPERAÇÃO DE VENDAS (A SALVAÇÃO!)
+                # Se o usuário comprou no site digitando o @username, aqui a gente acha ele!
+                if username:
+                    # Busca pedidos PAGOS deste bot, com este username, mas que ainda não receberam a mensagem
+                    pedidos_perdidos = db.query(Pedido).filter(
+                        Pedido.bot_id == bot_db.id,
+                        Pedido.username == username, # Bate pelo Username
+                        Pedido.status.in_(['paid', 'approved']),
+                        Pedido.mensagem_enviada == False
+                    ).all()
+                    
+                    if pedidos_perdidos:
+                        logger.info(f"🚑 RECUPERANDO {len(pedidos_perdidos)} vendas para {username} (ID Real: {user_id_str})")
+                        
+                        for p in pedidos_perdidos:
+                            # Atualiza com o ID Real (Agora podemos enviar mensagem!)
+                            p.telegram_id = user_id_str
+                            p.mensagem_enviada = True
+                            db.commit()
+                            
+                            # Tenta entregar o acesso agora
+                            try:
+                                # Prepara Canal
+                                canal_str = str(bot_db.id_canal_vip).strip()
+                                canal_id = int(canal_str) if canal_str.lstrip('-').isdigit() else canal_str
+                                
+                                # Desbanir e Gerar Link
+                                bot_temp.unban_chat_member(canal_id, chat_id)
+                                convite = bot_temp.create_chat_invite_link(chat_id=canal_id, member_limit=1, name=f"Recuperado {first_name}")
+                                
+                                msg_recuperada = f"✅ <b>Compra Identificada!</b>\n\nEncontramos seu pagamento via site.\nAqui está seu acesso:\n👉 {convite.invite_link}"
+                                bot_temp.send_message(chat_id, msg_recuperada, parse_mode="HTML")
+                            except Exception as e_rec:
+                                logger.error(f"Erro na entrega recuperada: {e_rec}")
+                                bot_temp.send_message(chat_id, "✅ <b>Pagamento Confirmado!</b>\nSeu acesso foi liberado. Tente entrar no canal.")
+
+                # 2. TRACKING
                 tracking_id_found = None
                 parts = txt.split()
                 if len(parts) > 1:
                     tracking_code = parts[1]
                     track_link = db.query(TrackingLink).filter(TrackingLink.codigo == tracking_code).first()
-                    
                     if track_link:
                         tracking_id_found = track_link.id
                         track_link.clicks += 1
                         track_link.leads += 1
                         db.commit()
-                        logger.info(f"🎯 Tracking detectado: {tracking_code} (+1 click)")
 
-                # 2. SALVAR LEAD
+                # 3. LEAD
                 try:
-                    criar_ou_atualizar_lead(db, str(chat_id), first_name, username, bot_db.id, tracking_id_found)
+                    criar_ou_atualizar_lead(db, user_id_str, first_name, username, bot_db.id, tracking_id_found)
                 except Exception as e_lead:
-                    logger.error(f"Erro ao salvar lead: {e_lead}")
+                    logger.error(f"Erro lead: {e_lead}")
 
-                # 3. CARREGAR FLUXO E MODO
+                # 4. FLUXO (Mini App ou Padrão)
                 flow = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
-                
-                # Define Modo (padrão se não existir)
-                modo_atual = getattr(flow, 'start_mode', 'padrao') if flow else 'padrao'
-                logger.info(f"🤖 [START] Bot {bot_db.id} ({bot_db.nome}) iniciou em modo: {modo_atual.upper()}")
-
-                # Textos
                 msg_texto = flow.msg_boas_vindas if (flow and flow.msg_boas_vindas) else "Olá! Seja bem-vindo."
                 msg_media = flow.media_url if flow else None
+                modo_atual = getattr(flow, 'start_mode', 'padrao') if flow else 'padrao'
                 
                 markup = types.InlineKeyboardMarkup()
 
-                # ====================================================
-                # 🚦 DIVISÃO DE ÁGUAS (AQUI É O PULO DO GATO)
-                # ====================================================
-                
                 if modo_atual == "miniapp" and flow and flow.miniapp_url:
-                    # [MODO A] MINI APP / LOJA
-                    # Apenas 1 botão que abre o WebApp
-                    
-                    url_loja = flow.miniapp_url
-                    # Corrige HTTP -> HTTPS (Obrigatório para WebApp)
-                    if not url_loja.startswith("https://"):
-                        url_loja = url_loja.replace("http://", "https://")
-                        
-                    texto_btn = flow.miniapp_btn_text or "ABRIR LOJA 🛍️"
-                    
-                    logger.info(f"📱 Gerando botão MiniApp: {texto_btn} -> {url_loja}")
-                    
-                    markup.add(types.InlineKeyboardButton(
-                        text=texto_btn,
+                    # MODO WEB APP
+                    url_loja = flow.miniapp_url.replace("http://", "https://")
+                    btn_web = types.InlineKeyboardButton(
+                        text=flow.miniapp_btn_text or "ABRIR LOJA 🛍️",
                         web_app=types.WebAppInfo(url=url_loja)
-                    ))
-                
+                    )
+                    markup.add(btn_web)
                 else:
-                    # [MODO B] PADRÃO (Botões de Callback)
-                    logger.info("🔘 Gerando botões padrão (Callback)")
-                    
-                    mostrar_planos_1 = flow.mostrar_planos_1 if flow else False
-                    
-                    if mostrar_planos_1:
+                    # MODO PADRÃO
+                    if flow and flow.mostrar_planos_1:
                         planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_db.id).all()
                         for p in planos:
                             markup.add(types.InlineKeyboardButton(f"💎 {p.nome_exibicao} - R$ {p.preco_atual:.2f}", callback_data=f"checkout_{p.id}"))
@@ -2580,7 +2562,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         btn_txt = flow.btn_text_1 if (flow and flow.btn_text_1) else "🔓 VER CONTEÚDO"
                         markup.add(types.InlineKeyboardButton(btn_txt, callback_data="step_1"))
 
-                # 4. ENVIO DA MENSAGEM
+                # Envio
                 try:
                     if msg_media:
                         if msg_media.lower().endswith(('.mp4', '.mov')):
@@ -2589,9 +2571,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             bot_temp.send_photo(chat_id, msg_media, caption=msg_texto, reply_markup=markup, parse_mode="HTML")
                     else:
                         bot_temp.send_message(chat_id, msg_texto, reply_markup=markup, parse_mode="HTML")
-                except Exception as e_send:
-                    logger.error(f"Erro envio mensagem start: {e_send}")
-                    # Fallback sem HTML
+                except:
                     bot_temp.send_message(chat_id, msg_texto, reply_markup=markup)
 
                 return {"status": "ok"}
