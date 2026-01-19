@@ -2061,6 +2061,7 @@ def delete_miniapp_category(cat_id: int, db: Session = Depends(get_db)):
 # =========================================================
 # 3. WEBHOOK PIX (A CORREÇÃO DO STATUS DE ENVIO ESTÁ AQUI)
 # =========================================================
+# 1. WEBHOOK PIX (COM AUTO-CORREÇÃO DE ID)
 @app.post("/webhook/pix")
 async def webhook_pix(request: Request, db: Session = Depends(get_db)):
     print("🔔 WEBHOOK PIX CHEGOU!") 
@@ -2073,23 +2074,19 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
             try: data = {k: v[0] for k, v in urllib.parse.parse_qs(body_str).items()}
             except: return {"status": "ignored"}
 
-        # Identificação da Transação
+        # Identificação
         raw_tx_id = data.get("id") or data.get("external_reference") or data.get("uuid")
         tx_id = str(raw_tx_id).lower() if raw_tx_id else None
         status_pix = str(data.get("status", "")).lower()
         
-        # Ignora se não for pago
         if status_pix not in ["paid", "approved", "completed", "succeeded"]:
             return {"status": "ignored"}
 
-        # Busca o Pedido
         pedido = db.query(Pedido).filter((Pedido.txid == tx_id) | (Pedido.transaction_id == tx_id)).first()
-        
-        # Se não achar ou já tiver processado, para.
         if not pedido or pedido.status in ["approved", "paid"]:
             return {"status": "ok"}
 
-        # 1. ATUALIZA STATUS FINANCEIRO (APENAS ISSO POR ENQUANTO)
+        # Atualiza Status
         now = datetime.utcnow()
         pedido.status = "approved" 
         pedido.data_aprovacao = now
@@ -2105,57 +2102,64 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                     pedido.data_expiracao = now + timedelta(days=plano_db.dias_duracao)
                     pedido.custom_expiration = pedido.data_expiracao
 
-        # 🔥 IMPORTANTE: NÃO MARCA "mensagem_enviada = True" AQUI AINDA!
-        # Deixamos como False por padrão. Só muda se o envio funcionar.
-        pedido.mensagem_enviada = False 
+        # NÃO marca enviado ainda
+        pedido.mensagem_enviada = False
         db.commit()
         
-        # 2. TENTA ENTREGAR
-        entrega_sucesso = False
+        # 🔥 TENTATIVA DE ENTREGA INTELIGENTE
+        sucesso_entrega = False
         try:
             bot_data = db.query(Bot).filter(Bot.id == pedido.bot_id).first()
             if bot_data:
                 tb = telebot.TeleBot(bot_data.token)
-                
-                # Verifica se o ID é numérico (12345) ou Username (@user)
-                # O Telegram SÓ envia mensagem ativa para ID Numérico.
                 target_id = str(pedido.telegram_id).strip()
                 
+                # 🕵️‍♂️ AUTO-RESOLUÇÃO DE ID (Se for username, busca no histórico de Leads)
+                if not target_id.isdigit():
+                    logger.info(f"⚠️ ID '{target_id}' não é numérico. Tentando resolver via Leads...")
+                    clean_user = str(pedido.username).lower().replace("@", "").strip()
+                    
+                    # Busca último lead com esse username
+                    lead = db.query(Lead).filter(
+                        Lead.bot_id == pedido.bot_id,
+                        (func.lower(Lead.username) == clean_user) | 
+                        (func.lower(Lead.username) == f"@{clean_user}")
+                    ).order_by(desc(Lead.created_at)).first()
+                    
+                    if lead and lead.user_id and lead.user_id.isdigit():
+                        logger.info(f"✅ ID Resolvido via Lead: {lead.user_id}")
+                        target_id = lead.user_id
+                        # Salva o ID correto no pedido
+                        pedido.telegram_id = target_id
+                        db.commit()
+
+                # Se agora temos um ID numérico, entrega!
                 if target_id.isdigit():
                     try:
-                        # Prepara Canal
                         canal_str = str(bot_data.id_canal_vip).strip()
                         canal_id = int(canal_str) if canal_str.lstrip('-').isdigit() else canal_str
 
-                        # Tenta Desbanir e Gerar Link
                         try: tb.unban_chat_member(canal_id, int(target_id))
                         except: pass
 
                         convite = tb.create_chat_invite_link(
-                            chat_id=canal_id, 
-                            member_limit=1, 
-                            name=f"Venda {pedido.first_name}"
+                            chat_id=canal_id, member_limit=1, name=f"Venda {pedido.first_name}"
                         )
-                        
                         val_txt = pedido.data_expiracao.strftime("%d/%m/%Y") if pedido.data_expiracao else "VITALÍCIO"
                         msg = f"✅ <b>Pagamento Confirmado!</b>\n📅 Validade: <b>{val_txt}</b>\n\nSeu acesso:\n👉 {convite.invite_link}"
                         
                         tb.send_message(int(target_id), msg, parse_mode="HTML")
-                        
-                        # ✅ SUCESSO! Agora sim marcamos.
-                        entrega_sucesso = True
+                        sucesso_entrega = True
                         logger.info(f"✅ Entrega realizada para ID: {target_id}")
-                        
                     except Exception as e_send:
                         logger.error(f"Erro envio Telegram: {e_send}")
                 else:
-                    logger.warning(f"⚠️ ID é Username ({target_id}). Aguardando /start para entregar.")
+                    logger.warning(f"⚠️ ID ainda inválido ({target_id}). Aguardando /start.")
 
         except Exception as e_bot:
             logger.error(f"Erro lógica bot: {e_bot}")
 
-        # Se deu tudo certo, marca no banco. Se não, fica False para o /start pegar.
-        if entrega_sucesso:
+        if sucesso_entrega:
             pedido.mensagem_enviada = True
             db.commit()
 
