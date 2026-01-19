@@ -1954,42 +1954,34 @@ def delete_miniapp_category(cat_id: int, db: Session = Depends(get_db)):
         db.commit()
     return {"status": "deleted"}
 
+# 🔔 WEBHOOK PIX (INTELIGENTE: RESOLVE IDS + ENTREGA BUMP)
 # =========================================================
-# 3. WEBHOOK PIX (A CORREÇÃO DO STATUS DE ENVIO ESTÁ AQUI)
-# =========================================================
-# 1. WEBHOOK PIX (COM AUTO-CORREÇÃO DE ID)
 @app.post("/webhook/pix")
 async def webhook_pix(request: Request, db: Session = Depends(get_db)):
     print("🔔 WEBHOOK PIX CHEGOU!") 
     try:
         body_bytes = await request.body()
         body_str = body_bytes.decode("utf-8")
-        
         try: data = json.loads(body_str)
         except: 
             try: data = {k: v[0] for k, v in urllib.parse.parse_qs(body_str).items()}
             except: return {"status": "ignored"}
 
-        # Identificação
         raw_tx_id = data.get("id") or data.get("external_reference") or data.get("uuid")
         tx_id = str(raw_tx_id).lower() if raw_tx_id else None
         status_pix = str(data.get("status", "")).lower()
         
-        if status_pix not in ["paid", "approved", "completed", "succeeded"]:
-            return {"status": "ignored"}
+        if status_pix not in ["paid", "approved", "completed", "succeeded"]: return {"status": "ignored"}
 
         pedido = db.query(Pedido).filter((Pedido.txid == tx_id) | (Pedido.transaction_id == tx_id)).first()
-        if not pedido or pedido.status in ["approved", "paid"]:
-            return {"status": "ok"}
+        if not pedido or pedido.status in ["approved", "paid"]: return {"status": "ok"}
 
-        # Atualiza Status
         now = datetime.utcnow()
         pedido.status = "approved" 
         pedido.data_aprovacao = now
         pedido.pagou_em = now
         pedido.status_funil = 'fundo'
         
-        # Calcula Validade
         if pedido.plano_id:
             pid = int(pedido.plano_id) if str(pedido.plano_id).isdigit() else None
             if pid:
@@ -1998,11 +1990,9 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                     pedido.data_expiracao = now + timedelta(days=plano_db.dias_duracao)
                     pedido.custom_expiration = pedido.data_expiracao
 
-        # NÃO marca enviado ainda
-        pedido.mensagem_enviada = False
+        pedido.mensagem_enviada = False 
         db.commit()
         
-        # 🔥 TENTATIVA DE ENTREGA INTELIGENTE
         sucesso_entrega = False
         try:
             bot_data = db.query(Bot).filter(Bot.id == pedido.bot_id).first()
@@ -2010,48 +2000,46 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                 tb = telebot.TeleBot(bot_data.token)
                 target_id = str(pedido.telegram_id).strip()
                 
-                # 🕵️‍♂️ AUTO-RESOLUÇÃO DE ID (Se for username, busca no histórico de Leads)
+                # 🔥 AUTO-CORREÇÃO DE ID
                 if not target_id.isdigit():
-                    logger.info(f"⚠️ ID '{target_id}' não é numérico. Tentando resolver via Leads...")
+                    logger.info(f"⚠️ ID '{target_id}' não é numérico. Buscando Lead correspondente...")
                     clean_user = str(pedido.username).lower().replace("@", "").strip()
-                    
-                    # Busca último lead com esse username
                     lead = db.query(Lead).filter(
                         Lead.bot_id == pedido.bot_id,
-                        (func.lower(Lead.username) == clean_user) | 
-                        (func.lower(Lead.username) == f"@{clean_user}")
+                        (func.lower(Lead.username) == clean_user) | (func.lower(Lead.username) == f"@{clean_user}")
                     ).order_by(desc(Lead.created_at)).first()
-                    
                     if lead and lead.user_id and lead.user_id.isdigit():
                         logger.info(f"✅ ID Resolvido via Lead: {lead.user_id}")
                         target_id = lead.user_id
-                        # Salva o ID correto no pedido
                         pedido.telegram_id = target_id
                         db.commit()
 
-                # Se agora temos um ID numérico, entrega!
                 if target_id.isdigit():
                     try:
+                        # 1. ENTREGA PRINCIPAL
                         canal_str = str(bot_data.id_canal_vip).strip()
                         canal_id = int(canal_str) if canal_str.lstrip('-').isdigit() else canal_str
-
                         try: tb.unban_chat_member(canal_id, int(target_id))
                         except: pass
-
-                        convite = tb.create_chat_invite_link(
-                            chat_id=canal_id, member_limit=1, name=f"Venda {pedido.first_name}"
-                        )
-                        val_txt = pedido.data_expiracao.strftime("%d/%m/%Y") if pedido.data_expiracao else "VITALÍCIO"
-                        msg = f"✅ <b>Pagamento Confirmado!</b>\n📅 Validade: <b>{val_txt}</b>\n\nSeu acesso:\n👉 {convite.invite_link}"
                         
+                        convite = tb.create_chat_invite_link(chat_id=canal_id, member_limit=1, name=f"Venda {pedido.first_name}")
+                        val_txt = pedido.data_expiracao.strftime("%d/%m/%Y") if pedido.data_expiracao else "VITALÍCIO"
+                        
+                        msg = f"✅ <b>Pagamento Confirmado!</b>\n📅 Validade: <b>{val_txt}</b>\n\nSeu acesso:\n👉 {convite.invite_link}"
                         tb.send_message(int(target_id), msg, parse_mode="HTML")
+                        
+                        # 🔥 2. ENTREGA DO ORDER BUMP (NOVO)
+                        if pedido.tem_order_bump:
+                            bump_conf = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == pedido.bot_id).first()
+                            if bump_conf and bump_conf.link_acesso:
+                                msg_bump = f"🎁 <b>BÔNUS: {bump_conf.nome_produto}</b>\n\nAqui está seu acesso extra:\n👉 {bump_conf.link_acesso}"
+                                tb.send_message(int(target_id), msg_bump, parse_mode="HTML")
+                                logger.info("✅ Order Bump entregue!")
+
                         sucesso_entrega = True
                         logger.info(f"✅ Entrega realizada para ID: {target_id}")
                     except Exception as e_send:
                         logger.error(f"Erro envio Telegram: {e_send}")
-                else:
-                    logger.warning(f"⚠️ ID ainda inválido ({target_id}). Aguardando /start.")
-
         except Exception as e_bot:
             logger.error(f"Erro lógica bot: {e_bot}")
 
@@ -2060,7 +2048,6 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
             db.commit()
 
         return {"status": "received"}
-
     except Exception as e:
         logger.error(f"Erro webhook: {e}")
         return {"status": "error"}
@@ -2458,6 +2445,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         p.mensagem_enviada = True
                         db.commit()
                         try:
+                            # 1. ENTREGA PRINCIPAL
                             canal_str = str(bot_db.id_canal_vip).strip()
                             canal_id = int(canal_str) if canal_str.lstrip('-').isdigit() else canal_str
                             try: bot_temp.unban_chat_member(canal_id, chat_id)
@@ -2465,6 +2453,15 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             convite = bot_temp.create_chat_invite_link(chat_id=canal_id, member_limit=1, name=f"Recup {first_name}")
                             msg_rec = f"🎉 <b>Pagamento Encontrado!</b>\n\nAqui está seu link:\n👉 {convite.invite_link}"
                             bot_temp.send_message(chat_id, msg_rec, parse_mode="HTML")
+
+                            # 🔥 2. ENTREGA DO BUMP NA RECUPERAÇÃO (CORRIGIDO)
+                            if p.tem_order_bump:
+                                bump_conf = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_db.id).first()
+                                if bump_conf and bump_conf.link_acesso:
+                                    msg_bump = f"🎁 <b>BÔNUS: {bump_conf.nome_produto}</b>\n\nAqui está seu acesso extra:\n👉 {bump_conf.link_acesso}"
+                                    bot_temp.send_message(chat_id, msg_bump, parse_mode="HTML")
+                                    logger.info("✅ Order Bump recuperado/entregue!")
+
                         except Exception as e_rec:
                             logger.error(f"Erro rec: {e_rec}")
                             bot_temp.send_message(chat_id, "✅ Pagamento confirmado! Tente entrar no canal.")
