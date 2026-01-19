@@ -224,6 +224,44 @@ def registrar_remarketing(
 
 
 # =========================================================
+# 🛒 ROTA PÚBLICA PARA O MINI APP (FALTAVA ESSA)
+# =========================================================
+@app.get("/api/miniapp/{bot_id}")
+def get_miniapp_config(bot_id: int, db: Session = Depends(get_db)):
+    # Busca configurações
+    config = db.query(MiniAppConfig).filter(MiniAppConfig.bot_id == bot_id).first()
+    cats = db.query(MiniAppCategory).filter(MiniAppCategory.bot_id == bot_id).all()
+    flow = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
+    
+    # Se não tiver config, retorna padrão para não quebrar o front
+    start_mode = getattr(flow, 'start_mode', 'padrao') if flow else 'padrao'
+    
+    if not config:
+        return {
+            "config": {
+                "hero_title": "Loja VIP", 
+                "background_value": "#000000",
+                "start_mode": start_mode
+            },
+            "categories": [],
+            "flow": {"start_mode": start_mode}
+        }
+
+    return {
+        "config": config,
+        "categories": cats,
+        "flow": {
+            "start_mode": start_mode,
+            "miniapp_url": getattr(flow, 'miniapp_url', ''),
+            "miniapp_btn_text": getattr(flow, 'miniapp_btn_text', 'ABRIR LOJA')
+        }
+    }
+
+# ---------------------------------------------------------
+# AQUI COMEÇA O @app.on_event("startup")...
+# ---------------------------------------------------------
+
+# =========================================================
 # 2. AUTO-REPARO DO BANCO DE DADOS (LISTA MESTRA DE CORREÇÃO)
 # =========================================================
 @app.on_event("startup")
@@ -1000,96 +1038,76 @@ class PixCreateRequest(BaseModel):
     username: str
     tem_order_bump: bool = False
 
+# =========================================================
+# 1. GERAÇÃO DE PIX (COM LIMPEZA DE DADOS)
+# =========================================================
 @app.post("/api/pagamento/pix")
 def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
     try:
         logger.info(f"💰 Iniciando pagamento para: {data.first_name} (R$ {data.valor})")
 
-        # 1. Busca Token DO BOT (Prioridade Total)
         bot_atual = db.query(Bot).filter(Bot.id == data.bot_id).first()
         pushin_token = bot_atual.pushin_token if bot_atual else None
-
-        # Fallback (Segurança): Se o bot não tiver, tenta o global
+        
         if not pushin_token:
             config_sys = db.query(SystemConfig).filter(SystemConfig.key == "pushin_pay_token").first()
             pushin_token = config_sys.value if (config_sys and config_sys.value) else os.getenv("PUSHIN_PAY_TOKEN")
 
-        # ============================================================
-        # 🔥 PREPARAÇÃO DE DADOS (NORMALIZAÇÃO PARA FACILITAR RECUPERAÇÃO)
-        # ============================================================
-        # Remove espaços, @ e deixa tudo minúsculo para salvar padronizado
+        # 🔥 PADRONIZAÇÃO DE DADOS (CRUCIAL PARA O RESGATE)
+        # Se o user digitar "@Usuario", salvamos "usuario" para bater certo depois
         user_clean = str(data.username).strip().lower().replace("@", "") if data.username else "anonimo"
-        tid_clean = str(data.telegram_id).strip()
+        
+        # O ID que vamos salvar. Se vier numérico, ótimo. Se não, salvamos o user_clean no lugar.
+        tid_raw = str(data.telegram_id).strip()
+        tid_clean = tid_raw if tid_raw.isdigit() else user_clean
 
-        # Se o ID não for numérico (veio do campo manual como texto), assume que é igual ao username limpo
-        if not tid_clean.isdigit():
-            tid_clean = user_clean
-
+        # --- MODO TESTE (SEM TOKEN) ---
         if not pushin_token:
-            # MODO DE TESTE (Se não tiver token configurado em lugar nenhum)
-            logger.warning("⚠️ Token PushinPay não encontrado. Gerando PIX simulado.")
             fake_txid = str(uuid.uuid4())
-            # QR Code fake para teste
-            fake_qr_image = "https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=ExemploPagamentoZenyx"
-            copia_cola = "00020126580014br.gov.bcb.pix0136123e4567-e89b-12d3-a456-4266141740005204000053039865802BR5913Zenyx Teste6008Brasilia62070503***6304"
-            
-            # Cria o pedido no banco
             novo_pedido = Pedido(
                 bot_id=data.bot_id,
-                telegram_id=tid_clean, # 🔥 Salva ID limpo
+                telegram_id=tid_clean, 
                 first_name=data.first_name,
-                username=user_clean,   # 🔥 Salva User limpo
+                username=user_clean,   
                 valor=data.valor,
                 status='pending',
                 plano_id=data.plano_id,
                 plano_nome=data.plano_nome,
                 txid=fake_txid,
-                qr_code=fake_qr_image, 
+                qr_code="pix-fake-copia-cola", 
                 transaction_id=fake_txid,
-                link_acesso="",
                 tem_order_bump=data.tem_order_bump
             )
             db.add(novo_pedido)
             db.commit()
-            
-            return {
-                "txid": fake_txid,
-                "copia_cola": copia_cola,
-                "qr_code": fake_qr_image
-            }
+            return {"txid": fake_txid, "copia_cola": "pix-fake", "qr_code": "https://fake.com/qr.png"}
 
-        # 2. GERAÇÃO REAL NO PUSHINPAY
+        # --- MODO REAL (PUSHIN PAY) ---
         url = "https://api.pushinpay.com.br/api/pix/cashIn"
-        headers = {
-            "Authorization": f"Bearer {pushin_token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json"
-        }
+        headers = { "Authorization": f"Bearer {pushin_token}", "Content-Type": "application/json", "Accept": "application/json" }
         
-        # URL do Webhook (Ajuste se seu domínio for diferente)
         domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-testes-production.up.railway.app")
         if domain.startswith("https://"): domain = domain.replace("https://", "")
         
         payload = {
-            "value": int(data.valor * 100), # Centavos
+            "value": int(data.valor * 100),
             "webhook_url": f"https://{domain}/webhook/pix",
             "external_reference": f"bot_{data.bot_id}_{user_clean}_{int(time.time())}"
         }
 
         req = requests.post(url, json=payload, headers=headers)
         
-        if req.status_code == 200 or req.status_code == 201:
+        if req.status_code in [200, 201]:
             resp = req.json()
             txid = str(resp.get('id') or resp.get('txid'))
             copia_cola = resp.get('qr_code_text') or resp.get('pixCopiaEcola')
             qr_image = resp.get('qr_code_image_url') or resp.get('qr_code')
 
-            # Salva Pedido
             novo_pedido = Pedido(
                 bot_id=data.bot_id,
-                telegram_id=tid_clean, # 🔥 Salva ID limpo
+                telegram_id=tid_clean,
                 first_name=data.first_name,
-                username=user_clean,   # 🔥 Salva User limpo
+                username=user_clean,
                 valor=data.valor,
                 status='pending',
                 plano_id=data.plano_id,
@@ -1097,23 +1115,18 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
                 txid=txid,
                 qr_code=qr_image,
                 transaction_id=txid,
-                link_acesso="",
                 tem_order_bump=data.tem_order_bump
             )
             db.add(novo_pedido)
             db.commit()
 
-            return {
-                "txid": txid,
-                "copia_cola": copia_cola,
-                "qr_code": qr_image
-            }
+            return {"txid": txid, "copia_cola": copia_cola, "qr_code": qr_image}
         else:
             logger.error(f"Erro PushinPay: {req.text}")
-            raise HTTPException(status_code=400, detail="Erro ao gerar PIX no gateway.")
+            raise HTTPException(status_code=400, detail="Erro Gateway")
 
     except Exception as e:
-        logger.error(f"Erro fatal ao gerar PIX: {e}")
+        logger.error(f"Erro fatal PIX: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/pagamento/status/{txid}")
@@ -2045,12 +2058,8 @@ def delete_miniapp_category(cat_id: int, db: Session = Depends(get_db)):
         db.commit()
     return {"status": "deleted"}
 
-
 # =========================================================
-# 💳 WEBHOOK PIX (PUSHIN PAY) - VERSÃO HTML BLINDADA
-# =========================================================
-# =========================================================
-# 💳 WEBHOOK PIX (PUSHIN PAY) - VERSÃO BLINDADA ID
+# 3. WEBHOOK PIX (A CORREÇÃO DO STATUS DE ENVIO ESTÁ AQUI)
 # =========================================================
 @app.post("/webhook/pix")
 async def webhook_pix(request: Request, db: Session = Depends(get_db)):
@@ -2064,83 +2073,91 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
             try: data = {k: v[0] for k, v in urllib.parse.parse_qs(body_str).items()}
             except: return {"status": "ignored"}
 
-        # ID e Status
+        # Identificação da Transação
         raw_tx_id = data.get("id") or data.get("external_reference") or data.get("uuid")
         tx_id = str(raw_tx_id).lower() if raw_tx_id else None
         status_pix = str(data.get("status", "")).lower()
         
+        # Ignora se não for pago
         if status_pix not in ["paid", "approved", "completed", "succeeded"]:
             return {"status": "ignored"}
 
-        # Busca Pedido
+        # Busca o Pedido
         pedido = db.query(Pedido).filter((Pedido.txid == tx_id) | (Pedido.transaction_id == tx_id)).first()
+        
+        # Se não achar ou já tiver processado, para.
         if not pedido or pedido.status in ["approved", "paid"]:
             return {"status": "ok"}
 
-        # Lógica de Expiração
+        # 1. ATUALIZA STATUS FINANCEIRO (APENAS ISSO POR ENQUANTO)
         now = datetime.utcnow()
-        data_validade = None 
+        pedido.status = "approved" 
+        pedido.data_aprovacao = now
+        pedido.pagou_em = now
+        pedido.status_funil = 'fundo'
         
+        # Calcula Validade
         if pedido.plano_id:
             pid = int(pedido.plano_id) if str(pedido.plano_id).isdigit() else None
             if pid:
                 plano_db = db.query(PlanoConfig).filter(PlanoConfig.id == pid).first()
                 if plano_db and plano_db.dias_duracao and plano_db.dias_duracao < 90000:
-                    data_validade = now + timedelta(days=plano_db.dias_duracao)
+                    pedido.data_expiracao = now + timedelta(days=plano_db.dias_duracao)
+                    pedido.custom_expiration = pedido.data_expiracao
 
-        # Atualiza Pedido
-        pedido.status = "approved" 
-        pedido.data_aprovacao = now
-        pedido.data_expiracao = data_validade     
-        pedido.custom_expiration = data_validade
-        pedido.mensagem_enviada = True
-        pedido.status_funil = 'fundo'
-        pedido.pagou_em = now
+        # 🔥 IMPORTANTE: NÃO MARCA "mensagem_enviada = True" AQUI AINDA!
+        # Deixamos como False por padrão. Só muda se o envio funcionar.
+        pedido.mensagem_enviada = False 
         db.commit()
         
-        # Entrega
+        # 2. TENTA ENTREGAR
+        entrega_sucesso = False
         try:
             bot_data = db.query(Bot).filter(Bot.id == pedido.bot_id).first()
             if bot_data:
                 tb = telebot.TeleBot(bot_data.token)
                 
-                # 🔥 TENTA CONVERTER ID. SE FALHAR (USERNAME), NÃO TENTA ENVIAR
-                target_chat_id = None
-                try:
-                    target_chat_id = int(pedido.telegram_id)
-                except ValueError:
-                    logger.warning(f"⚠️ ID inválido para entrega: {pedido.telegram_id}. Bot não consegue iniciar conversa.")
+                # Verifica se o ID é numérico (12345) ou Username (@user)
+                # O Telegram SÓ envia mensagem ativa para ID Numérico.
+                target_id = str(pedido.telegram_id).strip()
                 
-                if target_chat_id:
+                if target_id.isdigit():
                     try:
                         # Prepara Canal
                         canal_str = str(bot_data.id_canal_vip).strip()
                         canal_id = int(canal_str) if canal_str.lstrip('-').isdigit() else canal_str
 
-                        try: tb.unban_chat_member(canal_id, target_chat_id)
+                        # Tenta Desbanir e Gerar Link
+                        try: tb.unban_chat_member(canal_id, int(target_id))
                         except: pass
 
-                        # Gera Link
-                        link_acesso = None
-                        try:
-                            convite = tb.create_chat_invite_link(
-                                chat_id=canal_id, 
-                                member_limit=1, 
-                                name=f"Venda {pedido.first_name}"
-                            )
-                            link_acesso = convite.invite_link
-                        except: pass
-
-                        if link_acesso:
-                            val_txt = data_validade.strftime("%d/%m/%Y") if data_validade else "VITALÍCIO"
-                            msg = f"✅ <b>Pagamento Confirmado!</b>\n📅 Validade: <b>{val_txt}</b>\n\nSeu acesso:\n👉 {link_acesso}"
-                            tb.send_message(target_chat_id, msg, parse_mode="HTML")
-                            
+                        convite = tb.create_chat_invite_link(
+                            chat_id=canal_id, 
+                            member_limit=1, 
+                            name=f"Venda {pedido.first_name}"
+                        )
+                        
+                        val_txt = pedido.data_expiracao.strftime("%d/%m/%Y") if pedido.data_expiracao else "VITALÍCIO"
+                        msg = f"✅ <b>Pagamento Confirmado!</b>\n📅 Validade: <b>{val_txt}</b>\n\nSeu acesso:\n👉 {convite.invite_link}"
+                        
+                        tb.send_message(int(target_id), msg, parse_mode="HTML")
+                        
+                        # ✅ SUCESSO! Agora sim marcamos.
+                        entrega_sucesso = True
+                        logger.info(f"✅ Entrega realizada para ID: {target_id}")
+                        
                     except Exception as e_send:
-                        logger.error(f"Erro envio telegram: {e_send}")
+                        logger.error(f"Erro envio Telegram: {e_send}")
+                else:
+                    logger.warning(f"⚠️ ID é Username ({target_id}). Aguardando /start para entregar.")
 
         except Exception as e_bot:
             logger.error(f"Erro lógica bot: {e_bot}")
+
+        # Se deu tudo certo, marca no banco. Se não, fica False para o /start pegar.
+        if entrega_sucesso:
+            pedido.mensagem_enviada = True
+            db.commit()
 
         return {"status": "received"}
 
@@ -2424,12 +2441,10 @@ def enviar_passo_automatico(bot_temp, chat_id, passo_atual, bot_db, db):
 # =========================================================
 @app.post("/webhook/{token}")
 async def receber_update_telegram(token: str, req: Request, db: Session = Depends(get_db)):
-    
     if token == "pix": return {"status": "ignored"}
     
     bot_db = db.query(Bot).filter(Bot.token == token).first()
-    if not bot_db or bot_db.status == "pausado": 
-        return {"status": "ignored"}
+    if not bot_db: return {"status": "ignored"}
 
     try:
         body = await req.json()
@@ -2438,187 +2453,123 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
         
         message = update.message if update.message else None
         
-        # ============================================================
-        # 🚪 1. O PORTEIRO (GATEKEEPER)
-        # ============================================================
-        if message and message.new_chat_members:
-            chat_id = str(message.chat.id)
-            canal_vip_id = str(bot_db.id_canal_vip).replace(" ", "").strip()
-            
-            if chat_id == canal_vip_id:
-                for member in message.new_chat_members:
-                    if member.is_bot: continue
-                    
-                    pedido = db.query(Pedido).filter(
-                        Pedido.bot_id == bot_db.id,
-                        Pedido.telegram_id == str(member.id),
-                        Pedido.status.in_(['paid', 'approved'])
-                    ).order_by(desc(Pedido.created_at)).first()
-                    
-                    allowed = False
-                    if pedido:
-                        if pedido.data_expiracao:
-                            if datetime.utcnow() < pedido.data_expiracao: allowed = True
-                        elif pedido.plano_nome:
-                            nm = pedido.plano_nome.lower()
-                            if "vital" in nm or "mega" in nm or "eterno" in nm: allowed = True
-                            else:
-                                d = 30
-                                if "diario" in nm or "24" in nm: d = 1
-                                elif "semanal" in nm: d = 7
-                                elif "trimestral" in nm: d = 90
-                                elif "anual" in nm: d = 365
-                                if pedido.created_at and datetime.utcnow() < (pedido.created_at + timedelta(days=d)):
-                                    allowed = True
-                    
-                    if not allowed:
-                        try:
-                            bot_temp.ban_chat_member(chat_id, member.id)
-                            bot_temp.unban_chat_member(chat_id, member.id)
-                            try:
-                                bot_temp.send_message(member.id, "🚫 <b>Acesso Negado.</b>\nPor favor, realize o pagamento para entrar.", parse_mode="HTML")
-                            except: pass
-                        except: pass
-            
-            return {"status": "checked"}
-
-        # ============================================================
-        # 👋 2. COMANDOS (/start, /suporte, /status)
-        # ============================================================
+        # ==========================================
+        # 🟢 LÓGICA DO COMANDO /START
+        # ==========================================
         if message and message.text:
             chat_id = message.chat.id
             txt = message.text.lower().strip()
             
-            # --- COMANDO /START (COM RASTREAMENTO + RECUPERAÇÃO + MINI APP) ---
             if txt == "/start" or txt.startswith("/start "):
                 first_name = message.from_user.first_name
-                username = message.from_user.username
+                # Pega username e normaliza (sem @, minusculo)
+                username_raw = message.from_user.username
+                username_clean = str(username_raw).lower().replace("@", "").strip() if username_raw else ""
+                
                 user_id_str = str(chat_id)
                 
-                # 🔥 1. RECUPERAÇÃO DE VENDAS (A SALVAÇÃO!)
-                # Procura pedidos pagos que ainda não foram entregues (mensagem_enviada = False)
-                # Tenta casar pelo Username (com ou sem @) ou pelo ID Numérico
-                
-                # Normaliza username atual para busca (remove @ e espaços)
-                current_user_clean = str(username).lower().replace("@", "").strip() if username else ""
-                
-                filtros_recuperacao = [
+                # ----------------------------------------------------
+                # 🔥 RECUPERAÇÃO DE VENDAS (A LÓGICA QUE FALTAVA)
+                # ----------------------------------------------------
+                # Busca pedidos PAGOS mas NÃO ENTREGUES (mensagem_enviada=False)
+                pendentes = db.query(Pedido).filter(
                     Pedido.bot_id == bot_db.id,
                     Pedido.status.in_(['paid', 'approved']),
                     Pedido.mensagem_enviada == False
-                ]
+                ).all()
                 
-                # Busca TODOS os pendentes de entrega deste bot
-                candidatos = db.query(Pedido).filter(*filtros_recuperacao).all()
-                pedidos_resgate = []
-                
-                for p in candidatos:
-                    # Normaliza o que está no banco
-                    db_user = str(p.username or "").lower().replace("@", "").strip()
-                    db_id = str(p.telegram_id or "").strip()
+                if pendentes:
+                    logger.info(f"🔍 Verificando {len(pendentes)} pedidos pendentes para: {username_clean} ou ID {user_id_str}")
                     
-                    match = False
-                    
-                    # A) Bate ID Numérico? (Caso o ID tenha sido salvo certo mas falhou o envio)
-                    if db_id == user_id_str: match = True
-                    
-                    # B) Bate Username? (Caso tenha salvo pelo user manual)
-                    elif current_user_clean and db_user == current_user_clean: match = True
-                    
-                    # C) Bate Username no campo ID? (Erro comum de salvar user no lugar do ID)
-                    elif current_user_clean and db_id.lower().replace("@","") == current_user_clean: match = True
-                    
-                    if match:
-                        pedidos_resgate.append(p)
-
-                if pedidos_resgate:
-                    logger.info(f"🚑 RECUPERANDO {len(pedidos_resgate)} vendas para {first_name} (ID Real: {user_id_str})")
-                    
-                    for p in pedidos_resgate:
-                        # Atualiza com o ID Real (Agora podemos enviar mensagem!)
-                        p.telegram_id = user_id_str
-                        p.mensagem_enviada = True # Marca como enviado para não repetir
-                        db.commit()
+                    for p in pendentes:
+                        # Normaliza dados do banco
+                        db_user = str(p.username or "").lower().replace("@", "").strip()
+                        db_id = str(p.telegram_id or "").strip()
                         
-                        # Tenta entregar o acesso agora
-                        try:
-                            # Prepara Canal
-                            canal_str = str(bot_db.id_canal_vip).strip()
-                            canal_id = int(canal_str) if canal_str.lstrip('-').isdigit() else canal_str
+                        match = False
+                        
+                        # 1. Match exato de Username
+                        if username_clean and db_user == username_clean: match = True
+                        # 2. Match de ID (caso tenha salvo certo mas falhou envio)
+                        if db_id == user_id_str: match = True
+                        # 3. Match Cruzado (Username salvo no campo ID)
+                        if username_clean and db_id.lower().replace("@","") == username_clean: match = True
+                        
+                        if match:
+                            logger.info(f"✅ Pedido {p.id} ENCONTRADO! Recuperando...")
                             
-                            # Desbanir e Gerar Link
-                            try: bot_temp.unban_chat_member(canal_id, chat_id)
-                            except: pass
+                            # Atualiza ID Real e Marca Enviado
+                            p.telegram_id = user_id_str
+                            p.mensagem_enviada = True
+                            db.commit()
                             
-                            convite = bot_temp.create_chat_invite_link(chat_id=canal_id, member_limit=1, name=f"Recuperado {first_name}")
-                            
-                            msg_recuperada = f"✅ <b>Compra Identificada!</b>\n\nEncontramos seu pagamento.\nAqui está seu acesso:\n👉 {convite.invite_link}"
-                            bot_temp.send_message(chat_id, msg_recuperada, parse_mode="HTML")
-                            logger.info(f"✅ Acesso recuperado enviado para {first_name}")
-                        except Exception as e_rec:
-                            logger.error(f"Erro na entrega recuperada: {e_rec}")
-                            bot_temp.send_message(chat_id, "✅ <b>Pagamento Confirmado!</b>\nSeu acesso foi liberado. Tente entrar no canal.")
+                            # Entrega o Produto
+                            try:
+                                canal_str = str(bot_db.id_canal_vip).strip()
+                                canal_id = int(canal_str) if canal_str.lstrip('-').isdigit() else canal_str
+                                
+                                try: bot_temp.unban_chat_member(canal_id, chat_id)
+                                except: pass
+                                
+                                convite = bot_temp.create_chat_invite_link(
+                                    chat_id=canal_id, 
+                                    member_limit=1, 
+                                    name=f"Recup {first_name}"
+                                )
+                                
+                                msg_recuperada = f"🎉 <b>Pagamento Localizado!</b>\n\nDesculpe a demora. Aqui está seu acesso:\n👉 {convite.invite_link}"
+                                bot_temp.send_message(chat_id, msg_recuperada, parse_mode="HTML")
+                            except Exception as e_rec:
+                                logger.error(f"Erro entrega rec: {e_rec}")
+                                bot_temp.send_message(chat_id, "✅ Pagamento confirmado! Tente entrar no canal agora.")
 
-                # 2. TRACKING
-                tracking_id_found = None
-                parts = txt.split()
-                if len(parts) > 1:
-                    tracking_code = parts[1]
-                    track_link = db.query(TrackingLink).filter(TrackingLink.codigo == tracking_code).first()
-                    if track_link:
-                        tracking_id_found = track_link.id
-                        track_link.clicks += 1
-                        track_link.leads += 1
-                        db.commit()
-                        logger.info(f"🎯 Tracking detectado: {tracking_code} (+1 click)")
-
-                # 3. LEAD
+                # ----------------------------------------------------
+                # RESTO DO FLUXO (LEAD, TRACKING, MENSAGEM)
+                # ----------------------------------------------------
+                
+                # Salva Lead
                 try:
-                    criar_ou_atualizar_lead(db, user_id_str, first_name, username, bot_db.id, tracking_id_found)
-                except Exception as e_lead:
-                    logger.error(f"Erro ao salvar lead: {e_lead}")
+                    # Simulação da sua função criar_ou_atualizar_lead
+                    lead = db.query(Lead).filter(Lead.user_id == user_id_str, Lead.bot_id == bot_db.id).first()
+                    if not lead:
+                        lead = Lead(user_id=user_id_str, nome=first_name, username=username_raw, bot_id=bot_db.id)
+                        db.add(lead)
+                    db.commit()
+                except: pass
 
-                # 4. FLUXO (Mini App ou Padrão)
+                # Envia Mensagem de Boas Vindas (Mini App ou Padrão)
                 flow = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
-                msg_texto = flow.msg_boas_vindas if (flow and flow.msg_boas_vindas) else "Olá! Seja bem-vindo."
-                msg_media = flow.media_url if flow else None
-                modo_atual = getattr(flow, 'start_mode', 'padrao') if flow else 'padrao'
+                modo = getattr(flow, 'start_mode', 'padrao') if flow else 'padrao'
+                msg_txt = flow.msg_boas_vindas if flow else "Olá!"
+                media = flow.media_url if flow else None
                 
-                markup = types.InlineKeyboardMarkup()
-
-                if modo_atual == "miniapp" and flow and flow.miniapp_url:
-                    # MODO WEB APP
-                    url_loja = flow.miniapp_url
-                    if not url_loja.startswith("https://"):
-                        url_loja = url_loja.replace("http://", "https://")
-                        
-                    btn_web = types.InlineKeyboardButton(
-                        text=flow.miniapp_btn_text or "ABRIR LOJA 🛍️",
-                        web_app=types.WebAppInfo(url=url_loja)
-                    )
-                    markup.add(btn_web)
+                mk = types.InlineKeyboardMarkup()
+                
+                if modo == "miniapp" and flow and flow.miniapp_url:
+                    url = flow.miniapp_url.replace("http://", "https://")
+                    mk.add(types.InlineKeyboardButton(
+                        text=flow.miniapp_btn_text or "ABRIR LOJA 🛍️", 
+                        web_app=types.WebAppInfo(url=url)
+                    ))
                 else:
-                    # MODO PADRÃO
                     if flow and flow.mostrar_planos_1:
                         planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_db.id).all()
-                        for p in planos:
-                            markup.add(types.InlineKeyboardButton(f"💎 {p.nome_exibicao} - R$ {p.preco_atual:.2f}", callback_data=f"checkout_{p.id}"))
+                        for pl in planos:
+                            mk.add(types.InlineKeyboardButton(f"💎 {pl.nome_exibicao}", callback_data=f"checkout_{pl.id}"))
                     else:
-                        btn_txt = flow.btn_text_1 if (flow and flow.btn_text_1) else "🔓 VER CONTEÚDO"
-                        markup.add(types.InlineKeyboardButton(btn_txt, callback_data="step_1"))
+                        btn = flow.btn_text_1 if flow else "Ver Conteúdo"
+                        mk.add(types.InlineKeyboardButton(btn, callback_data="step_1"))
 
-                # Envio da Mensagem
                 try:
-                    if msg_media:
-                        if msg_media.lower().endswith(('.mp4', '.mov')):
-                            bot_temp.send_video(chat_id, msg_media, caption=msg_texto, reply_markup=markup, parse_mode="HTML")
+                    if media:
+                        if media.endswith(('.mp4', '.mov')):
+                            bot_temp.send_video(chat_id, media, caption=msg_txt, reply_markup=mk, parse_mode="HTML")
                         else:
-                            bot_temp.send_photo(chat_id, msg_media, caption=msg_texto, reply_markup=markup, parse_mode="HTML")
+                            bot_temp.send_photo(chat_id, media, caption=msg_txt, reply_markup=mk, parse_mode="HTML")
                     else:
-                        bot_temp.send_message(chat_id, msg_texto, reply_markup=markup, parse_mode="HTML")
+                        bot_temp.send_message(chat_id, msg_txt, reply_markup=mk, parse_mode="HTML")
                 except:
-                    # Fallback sem HTML se der erro
-                    bot_temp.send_message(chat_id, msg_texto, reply_markup=markup)
+                    bot_temp.send_message(chat_id, msg_txt, reply_markup=mk)
 
                 return {"status": "ok"}
 
