@@ -2991,6 +2991,10 @@ def obter_estatisticas_funil(
 # ADICIONA SUPORTE PARA FILTROS: meio, fundo, expirado
 # ============================================================
 
+# ============================================================
+# 🔥 ROTA ATUALIZADA: /api/admin/contacts (CORREÇÃO DE FUSO HORÁRIO)
+# ============================================================
+
 @app.get("/api/admin/contacts")
 async def get_contacts(
     status: str = "todos",
@@ -3000,13 +3004,18 @@ async def get_contacts(
     db: Session = Depends(get_db)
 ):
     """
-    🔥 [ATUALIZADO] Retorna contatos únicos (sem duplicatas)
-    NOVOS FILTROS: meio, fundo, expirado
+    Retorna contatos corrigindo erro de 'offset-naive vs offset-aware'
+    Mantendo todos os filtros originais.
     """
     try:
         offset = (page - 1) * per_page
         all_contacts = []
         
+        # Helper para limpar fuso horário
+        def limpar_data(dt):
+            if not dt: return datetime.utcnow()
+            return dt.replace(tzinfo=None)
+
         # ============================================================
         # FILTRO: TODOS
         # ============================================================
@@ -3015,71 +3024,62 @@ async def get_contacts(
             
             # 1. Buscar LEADS
             query_leads = db.query(Lead)
-            if bot_id:
-                query_leads = query_leads.filter(Lead.bot_id == bot_id)
+            if bot_id: query_leads = query_leads.filter(Lead.bot_id == bot_id)
             leads = query_leads.all()
-            logger.info(f"📊 Busca TODOS: {len(leads)} leads encontrados")
             
             for lead in leads:
                 telegram_id = str(lead.user_id)
+                dt_criacao = limpar_data(lead.created_at)
+                
                 contatos_unicos[telegram_id] = {
                     "id": lead.id,
                     "telegram_id": telegram_id,
                     "user_id": telegram_id,
                     "first_name": lead.nome or "Sem nome",
-                    "nome": lead.nome or "Sem nome",
                     "username": lead.username or "sem_username",
                     "plano_nome": "-",
                     "valor": 0.0,
                     "status": "pending",
                     "role": "user",
                     "custom_expiration": None,
-                    "created_at": lead.created_at or datetime.utcnow(),
+                    "created_at": dt_criacao, # Data limpa
                     "origem": "lead",
                     "status_funil": "topo"
                 }
             
-            # 2. Buscar PEDIDOS - SOBRESCREVE leads
+            # 2. Buscar PEDIDOS (Sobrescreve Leads)
             query_pedidos = db.query(Pedido)
-            if bot_id:
-                query_pedidos = query_pedidos.filter(Pedido.bot_id == bot_id)
+            if bot_id: query_pedidos = query_pedidos.filter(Pedido.bot_id == bot_id)
             pedidos = query_pedidos.all()
-            logger.info(f"📊 Busca TODOS: {len(pedidos)} pedidos encontrados")
             
             for pedido in pedidos:
                 telegram_id = str(pedido.telegram_id)
                 
-                # Determina status_funil baseado no status do pagamento
-                if pedido.status in ["paid", "active", "approved"]:
-                    status_funil = "fundo"
-                elif pedido.status == "pending":
-                    status_funil = "meio"
-                elif pedido.status == "expired":
-                    status_funil = "expirado"
-                else:
-                    status_funil = "meio"
+                if pedido.status in ["paid", "active", "approved"]: status_funil = "fundo"
+                elif pedido.status == "expired": status_funil = "expirado"
+                else: status_funil = "meio"
                 
+                dt_criacao = limpar_data(pedido.created_at)
+
                 contatos_unicos[telegram_id] = {
                     "id": pedido.id,
                     "telegram_id": telegram_id,
                     "user_id": telegram_id,
                     "first_name": pedido.first_name or "Sem nome",
-                    "nome": pedido.first_name or "Sem nome",
                     "username": pedido.username or "sem_username",
                     "plano_nome": pedido.plano_nome or "-",
                     "valor": pedido.valor or 0.0,
                     "status": pedido.status,
                     "role": "user",
                     "custom_expiration": pedido.custom_expiration,
-                    "created_at": pedido.created_at or datetime.utcnow(),
+                    "created_at": dt_criacao, # Data limpa
                     "origem": "pedido",
                     "status_funil": status_funil
                 }
             
             all_contacts = list(contatos_unicos.values())
-            logger.info(f"📊 Busca TODOS: {len(all_contacts)} contatos ÚNICOS (sem duplicatas)")
-            
             all_contacts.sort(key=lambda x: x["created_at"], reverse=True)
+            
             total = len(all_contacts)
             pag_contacts = all_contacts[offset:offset + per_page]
             
@@ -3092,17 +3092,14 @@ async def get_contacts(
             }
         
         # ============================================================
-        # 🔥 [NOVO] FILTRO: MEIO (Leads Quentes - PIX gerado mas não pago)
+        # FILTRO: MEIO (Leads Quentes)
         # ============================================================
         elif status == "meio":
             query = db.query(Pedido).filter(Pedido.status == "pending")
-            if bot_id:
-                query = query.filter(Pedido.bot_id == bot_id)
+            if bot_id: query = query.filter(Pedido.bot_id == bot_id)
             
             total = query.count()
             pedidos = query.offset(offset).limit(per_page).all()
-            
-            logger.info(f"🔥 MEIO: {total} leads quentes (pending)")
             
             contacts = [{
                 "id": p.id,
@@ -3114,30 +3111,21 @@ async def get_contacts(
                 "status": p.status,
                 "role": "user",
                 "custom_expiration": p.custom_expiration,
-                "created_at": p.created_at,
+                "created_at": limpar_data(p.created_at),
                 "status_funil": "meio"
             } for p in pedidos]
             
-            return {
-                "data": contacts,
-                "total": total,
-                "page": page,
-                "per_page": per_page,
-                "total_pages": (total + per_page - 1) // per_page
-            }
+            return {"data": contacts, "total": total, "page": page, "per_page": per_page, "total_pages": (total + per_page - 1) // per_page}
         
         # ============================================================
-        # 🔥 [NOVO] FILTRO: FUNDO (Clientes - Pagos)
+        # FILTRO: FUNDO (Clientes Pagos)
         # ============================================================
         elif status == "fundo":
             query = db.query(Pedido).filter(Pedido.status.in_(["paid", "active", "approved"]))
-            if bot_id:
-                query = query.filter(Pedido.bot_id == bot_id)
+            if bot_id: query = query.filter(Pedido.bot_id == bot_id)
             
             total = query.count()
             pedidos = query.offset(offset).limit(per_page).all()
-            
-            logger.info(f"✅ FUNDO: {total} clientes pagos")
             
             contacts = [{
                 "id": p.id,
@@ -3149,30 +3137,21 @@ async def get_contacts(
                 "status": p.status,
                 "role": "user",
                 "custom_expiration": p.custom_expiration,
-                "created_at": p.created_at,
+                "created_at": limpar_data(p.created_at),
                 "status_funil": "fundo"
             } for p in pedidos]
             
-            return {
-                "data": contacts,
-                "total": total,
-                "page": page,
-                "per_page": per_page,
-                "total_pages": (total + per_page - 1) // per_page
-            }
+            return {"data": contacts, "total": total, "page": page, "per_page": per_page, "total_pages": (total + per_page - 1) // per_page}
         
         # ============================================================
-        # 🔥 [ATUALIZADO] FILTRO: EXPIRADO
+        # FILTRO: EXPIRADO
         # ============================================================
         elif status == "expirado" or status == "expirados":
             query = db.query(Pedido).filter(Pedido.status == "expired")
-            if bot_id:
-                query = query.filter(Pedido.bot_id == bot_id)
+            if bot_id: query = query.filter(Pedido.bot_id == bot_id)
             
             total = query.count()
             pedidos = query.offset(offset).limit(per_page).all()
-            
-            logger.info(f"❄️ EXPIRADOS: {total} pedidos expirados")
             
             contacts = [{
                 "id": p.id,
@@ -3184,25 +3163,18 @@ async def get_contacts(
                 "status": p.status,
                 "role": "user",
                 "custom_expiration": p.custom_expiration,
-                "created_at": p.created_at,
+                "created_at": limpar_data(p.created_at),
                 "status_funil": "expirado"
             } for p in pedidos]
             
-            return {
-                "data": contacts,
-                "total": total,
-                "page": page,
-                "per_page": per_page,
-                "total_pages": (total + per_page - 1) // per_page
-            }
+            return {"data": contacts, "total": total, "page": page, "per_page": per_page, "total_pages": (total + per_page - 1) // per_page}
         
         # ============================================================
-        # FILTRO: PAGANTES (mantido para compatibilidade)
+        # FILTRO: PAGANTES (Compatibilidade)
         # ============================================================
         elif status == "pagantes":
             query = db.query(Pedido).filter(Pedido.status.in_(["paid", "active", "approved"]))
-            if bot_id:
-                query = query.filter(Pedido.bot_id == bot_id)
+            if bot_id: query = query.filter(Pedido.bot_id == bot_id)
             
             total = query.count()
             pedidos = query.offset(offset).limit(per_page).all()
@@ -3217,24 +3189,17 @@ async def get_contacts(
                 "status": p.status,
                 "role": "user",
                 "custom_expiration": p.custom_expiration,
-                "created_at": p.created_at
+                "created_at": limpar_data(p.created_at)
             } for p in pedidos]
             
-            return {
-                "data": contacts,
-                "total": total,
-                "page": page,
-                "per_page": per_page,
-                "total_pages": (total + per_page - 1) // per_page
-            }
+            return {"data": contacts, "total": total, "page": page, "per_page": per_page, "total_pages": (total + per_page - 1) // per_page}
         
         # ============================================================
-        # FILTRO: PENDENTES (mantido para compatibilidade)
+        # FILTRO: PENDENTES (Compatibilidade)
         # ============================================================
         elif status == "pendentes":
             query = db.query(Pedido).filter(Pedido.status == "pending")
-            if bot_id:
-                query = query.filter(Pedido.bot_id == bot_id)
+            if bot_id: query = query.filter(Pedido.bot_id == bot_id)
             
             total = query.count()
             pedidos = query.offset(offset).limit(per_page).all()
@@ -3249,20 +3214,14 @@ async def get_contacts(
                 "status": p.status,
                 "role": "user",
                 "custom_expiration": p.custom_expiration,
-                "created_at": p.created_at
+                "created_at": limpar_data(p.created_at)
             } for p in pedidos]
             
-            return {
-                "data": contacts,
-                "total": total,
-                "page": page,
-                "per_page": per_page,
-                "total_pages": (total + per_page - 1) // per_page
-            }
+            return {"data": contacts, "total": total, "page": page, "per_page": per_page, "total_pages": (total + per_page - 1) // per_page}
         
         else:
             return {"data": [], "total": 0, "page": 1, "per_page": per_page, "total_pages": 0}
-            
+
     except Exception as e:
         logger.error(f"Erro ao buscar contatos: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -3958,42 +3917,36 @@ async def webhook(req: Request, bg_tasks: BackgroundTasks):
             payload = json.loads(raw)
         except: 
             # Fallback para formato x-www-form-urlencoded
-            payload = {k: v[0] for k,v in parse_qs(raw.decode()).items()}
+            payload = {k: v[0] for k,v in urllib.parse.parse_qs(raw.decode()).items()}
         
-        # Log para debug (opcional, pode remover em produção)
-        # logger.info(f"Webhook recebido: {payload}")
-
-        # Se for pagamento APROVADO (Vários status possíveis de gateways)
-        if str(payload.get('status')).upper() in ['PAID', 'APPROVED', 'COMPLETED', 'SUCCEEDED']:
+        status_pag = str(payload.get('status')).upper()
+        
+        if status_pag in ['PAID', 'APPROVED', 'COMPLETED', 'SUCCEEDED']:
             db = SessionLocal()
             tx = str(payload.get('id')).lower() # ID da transação
             
-            # Busca o pedido pelo ID da transação
             p = db.query(Pedido).filter(Pedido.transaction_id == tx).first()
             
-            # Se achou o pedido e ele ainda não estava pago
             if p and p.status != 'paid':
                 p.status = 'paid'
                 db.commit() # Salva o status pago
                 
-                # --- 🔔 NOTIFICAÇÃO AO ADMIN (NOVO) ---
+                # --- 🔔 NOTIFICAÇÃO AO ADMIN ---
                 try:
                     bot_db = db.query(Bot).filter(Bot.id == p.bot_id).first()
                     
-                    # Verifica se o bot tem um Admin configurado para receber o aviso
                     if bot_db and bot_db.admin_principal_id:
                         msg_venda = (
-                            f"💰 *VENDA APROVADA!*\n\n"
+                            f"💰 *VENDA APROVADA (SITE)!*\n\n"
                             f"👤 Cliente: {p.first_name}\n"
                             f"💎 Plano: {p.plano_nome}\n"
                             f"💵 Valor: R$ {p.valor:.2f}\n"
-                            f"📅 Data: {datetime.now().strftime('%d/%m %H:%M')}"
+                            f"🆔 ID/User: {p.telegram_id}"
                         )
-                        # Chama a função auxiliar de notificação
+                        # Chama a função auxiliar de notificação (assumindo que existe no seu código)
                         notificar_admin_principal(bot_db, msg_venda) 
                 except Exception as e_notify:
                     logger.error(f"Erro ao notificar admin: {e_notify}")
-                # --------------------------------------
 
                 # --- ENVIO DO LINK DE ACESSO AO CLIENTE ---
                 if not p.mensagem_enviada:
@@ -4001,23 +3954,31 @@ async def webhook(req: Request, bg_tasks: BackgroundTasks):
                         bot_data = db.query(Bot).filter(Bot.id == p.bot_id).first()
                         tb = telebot.TeleBot(bot_data.token)
                         
-                        # Tenta converter o ID do canal VIP com segurança
-                        try: canal_vip_id = int(str(bot_data.id_canal_vip).strip())
-                        except: canal_vip_id = bot_data.id_canal_vip
+                        # 🔥 Tenta converter para INT. Se falhar (é username), ignora envio automático
+                        target_chat_id = None
+                        try:
+                            target_chat_id = int(p.telegram_id)
+                        except:
+                            logger.warning(f"⚠️ ID não numérico ({p.telegram_id}). Cliente deve iniciar o bot manualmente.")
+                        
+                        if target_chat_id:
+                            # Tenta converter o ID do canal VIP com segurança
+                            try: canal_vip_id = int(str(bot_data.id_canal_vip).strip())
+                            except: canal_vip_id = bot_data.id_canal_vip
 
-                        # Tenta desbanir o usuário antes (garantia caso ele tenha sido expulso antes)
-                        try: tb.unban_chat_member(canal_vip_id, int(p.telegram_id))
-                        except: pass
+                            # Tenta desbanir o usuário antes (garantia)
+                            try: tb.unban_chat_member(canal_vip_id, target_chat_id)
+                            except: pass
 
-                        # Gera Link Único (Válido para 1 pessoa)
-                        convite = tb.create_chat_invite_link(
-                            chat_id=canal_vip_id, 
-                            member_limit=1, 
-                            name=f"Venda {p.first_name}"
-                        )
-                        link_acesso = convite.invite_link
+                            # Gera Link Único (Válido para 1 pessoa)
+                            convite = tb.create_chat_invite_link(
+                                chat_id=canal_vip_id, 
+                                member_limit=1, 
+                                name=f"Venda {p.first_name}"
+                            )
+                            link_acesso = convite.invite_link
 
-                        msg_sucesso = f"""
+                            msg_sucesso = f"""
 ✅ <b>Pagamento Confirmado!</b>
 
 Seu acesso ao <b>{bot_data.nome}</b> foi liberado.
@@ -4027,29 +3988,27 @@ Toque no link abaixo para entrar no Canal VIP:
 
 ⚠️ <i>Este link é único e válido apenas para você.</i>
 """
-                        # Envia a mensagem com o link para o usuário
-                        tb.send_message(int(p.telegram_id), msg_sucesso, parse_mode="HTML")
-                        
-                        # Marca que a mensagem foi enviada para não enviar duplicado
-                        p.mensagem_enviada = True
-                        db.commit()
-                        logger.info(f"🏆 Link enviado para {p.first_name}")
+                            # Envia a mensagem com o link para o usuário
+                            tb.send_message(target_chat_id, msg_sucesso, parse_mode="HTML")
+                            
+                            p.mensagem_enviada = True
+                            db.commit()
+                            logger.info(f"🏆 Link enviado para {p.first_name}")
 
                     except Exception as e_telegram:
                         logger.error(f"❌ ERRO TELEGRAM: {e_telegram}")
-                        # Fallback: Avisa o cliente que deu erro no envio do link, mas confirma o pagamento
+                        # Fallback (opcional): Tentar avisar se falhar
                         try:
-                            tb.send_message(int(p.telegram_id), "✅ Pagamento recebido! \n\n⚠️ Houve um erro ao gerar seu link automático. Um administrador entrará em contato em breve.")
+                            if target_chat_id:
+                                tb.send_message(target_chat_id, "✅ Pagamento recebido! \n\n⚠️ Houve um erro ao gerar seu link automático. Um administrador entrará em contato em breve.")
                         except: pass
 
             db.close()
         
-        # Retorna 200 OK para o Gateway de Pagamento parar de mandar o Webhook
         return {"status": "received"}
 
     except Exception as e:
         logger.error(f"❌ ERRO CRÍTICO NO WEBHOOK: {e}")
-        # Mesmo com erro, retornamos 200 ou estrutura json para não travar o gateway (opcional, depende da estratégia)
         return {"status": "error"}
 
 # ============================================================
