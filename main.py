@@ -3724,27 +3724,36 @@ def enviar_remarketing_individual(payload: IndividualRemarketingRequest, db: Ses
 def status_remarketing():
     return CAMPAIGN_STATUS
 
-@app.get("/api/admin/bots/{bot_id}/remarketing/history")
-def get_remarketing_history(bot_id: int, page: int = 1, limit: int = 10, db: Session = Depends(get_db)):
+# =========================================================
+# ROTA DE HISTÓRICO (CORRIGIDA PARA COMPATIBILIDADE)
+# =========================================================
+# URL Ajustada para bater com o api.js antigo: /api/admin/remarketing/history/{bot_id}
+@app.get("/api/admin/remarketing/history/{bot_id}") 
+def get_remarketing_history(
+    bot_id: int, 
+    page: int = 1, 
+    per_page: int = 10, # Frontend manda 'per_page', não 'limit'
+    db: Session = Depends(get_db)
+):
     try:
-        limit = min(limit, 50)
+        limit = min(per_page, 50)
         skip = (page - 1) * limit
         
+        # Filtra pelo bot_id
         query = db.query(RemarketingCampaign).filter(RemarketingCampaign.bot_id == bot_id)
-        total = query.count()
         
-        # Ordena por mais recente
+        total = query.count()
+        # Ordena por data (descrescente)
         campanhas = query.order_by(desc(RemarketingCampaign.data_envio)).offset(skip).limit(limit).all()
             
         data = []
         for c in campanhas:
-            # CORREÇÃO DA DATA: Envia .isoformat() ou None
-            # O Frontend vai converter isso para "DD/MM/YYYY" automaticamente
+            # Formatação segura da data
             data_formatada = c.data_envio.isoformat() if c.data_envio else None
-
+            
             data.append({
                 "id": c.id,
-                "data": data_formatada, # 🔥 AQUI ESTAVA O ERRO DA DATA
+                "data": data_formatada, 
                 "target": c.target,
                 "total": c.total_leads,
                 "sent_success": c.sent_success,
@@ -3752,11 +3761,15 @@ def get_remarketing_history(bot_id: int, page: int = 1, limit: int = 10, db: Ses
                 "config": c.config
             })
 
+        # Cálculo correto de páginas
+        total_pages = (total // limit) + (1 if total % limit > 0 else 0)
+
         return {
             "data": data,
             "total": total,
             "page": page,
-            "total_pages": (total // limit) + (1 if total % limit > 0 else 0)
+            "per_page": limit,
+            "total_pages": total_pages
         }
     except Exception as e:
         logger.error(f"Erro ao buscar histórico: {e}")
